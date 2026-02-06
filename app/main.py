@@ -1,4 +1,4 @@
-from app.repository import upsert_kline_1m
+from app.repository.repository import upsert_kline_1m
 
 sample_payload = {
     "e": "kline",
