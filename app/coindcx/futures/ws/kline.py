@@ -2,6 +2,8 @@ import socketio
 import json
 from app.coindcx.futures.instruments import INSTRUMENTS
 from app.repository.cdx_repo import insert_cdx_candle
+from app.coindcx.futures.ws.db_worker import CDX_DB_QUEUE, start_db_worker
+
 
 socketEndpoint = "wss://stream.coindcx.com"
 TF = "1m"
@@ -58,7 +60,8 @@ def on_candlestick(response):
         print(closed_candle)
 
         # ⭐ GENERIC INSERT
-        insert_cdx_candle(closed_candle, is_closed=True)
+        CDX_DB_QUEUE.put((closed_candle, True))
+
 
         CANDLE_STATE[symbol]["last_open_time"] = open_time
 
@@ -77,6 +80,7 @@ def disconnect():
 
 
 def main():
+    start_db_worker()
     sio.connect(socketEndpoint, transports=["websocket"])
     sio.wait()
 
