@@ -4,11 +4,11 @@ import time
 
 from app.coindcx.futures.instruments import INSTRUMENTS
 from app.coindcx.futures.ws.db_worker import CDX_DB_QUEUE, start_db_worker
+from app.coindcx.futures.ws.tf_aggregator import aggregate   # ⭐ only addition
 
 socketEndpoint = "wss://stream.coindcx.com"
 TF = "1m"
 
-# ⭐ STATE STORE (symbol-wise)
 CANDLE_STATE = {}
 
 sio = socketio.Client(
@@ -23,7 +23,6 @@ sio = socketio.Client(
 @sio.event
 def connect():
     print("✅ Connected!")
-
     for instrument in INSTRUMENTS:
         channel = f"{instrument}_{TF}-futures"
         print(channel)
@@ -46,7 +45,6 @@ def on_candlestick(response):
 
     open_time = candle["open_time"]
 
-    # ⭐ Initialize state
     if symbol not in CANDLE_STATE:
         CANDLE_STATE[symbol] = {
             "last_open_time": open_time,
@@ -56,28 +54,23 @@ def on_candlestick(response):
 
     last_open = CANDLE_STATE[symbol]["last_open_time"]
 
-    # ⭐ Candle closed detection
     if open_time != last_open:
         closed_candle = CANDLE_STATE[symbol]["last_candle"]
 
         print("✅ Previous candle CLOSED")
         print(closed_candle)
 
-        # ⭐ Non-blocking queue push
-        try:
-            CDX_DB_QUEUE.put_nowait((closed_candle, True))
-        except:
-            print("⚠️ DB queue full, candle dropped:", symbol)
+        # ⭐ original behaviour preserved
+        CDX_DB_QUEUE.put((closed_candle, True))
+
+        # ⭐ ONLY addition: build higher TF candles
+        agg_candles = aggregate(symbol, closed_candle)
+        for agg in agg_candles:
+            CDX_DB_QUEUE.put((agg, True))
 
         CANDLE_STATE[symbol]["last_open_time"] = open_time
 
-    # update latest snapshot
     CANDLE_STATE[symbol]["last_candle"] = candle
-
-
-@sio.on("*")
-def catch_all(event, data):
-    print(f"\n🔹 EVENT: {event}")
 
 
 @sio.event
