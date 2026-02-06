@@ -1,58 +1,61 @@
-from sqlalchemy.exc import IntegrityError
-from app.db import SessionLocal
-from app.models import CDXCandle1M
+from sqlalchemy.dialects.postgresql import insert
+from app.db import engine
+from app.models import (
+    CDXCandle1M,
+    CDXCandle15M,
+    CDXCandle1H,
+    CDXCandle4H,
+    CDXCandle1D,
+)
 
-# duration → model map
 CDX_MODEL_MAP = {
     "1m": CDXCandle1M,
+    "15m": CDXCandle15M,
+    "1h": CDXCandle1H,
+    "4h": CDXCandle4H,
+    "1d": CDXCandle1D,
 }
 
 
-def insert_cdx_candle(payload: dict, is_closed: bool):
+def upsert_klines(klines: list):
 
-    duration = payload.get("duration")
-    model_cls = CDX_MODEL_MAP.get(duration)
+    if not klines:
+        return
 
-    if not model_cls:
-        print(f"⚠️ Unsupported duration: {duration}")
-        return None
+    interval = klines[0]["duration"]
+    model = CDX_MODEL_MAP.get(interval)
 
-    session = SessionLocal()
+    if not model:
+        print("⚠️ Unsupported interval:", interval)
+        return
 
-    try:
-        obj = model_cls(
-            pair=payload["pair"],
-            symbol=payload["symbol"],
-            duration=duration,
+    with engine.begin() as conn:
+        for k in klines:
 
-            open_time=int(payload["open_time"]),
-            close_time=int(payload["close_time"]),
+            stmt = insert(model).values(
+                pair=k["pair"],
+                symbol=k["symbol"],
+                duration=k["duration"],
+                open_time=int(k["open_time"]),
+                close_time=int(k["close_time"]),
+                open_price=float(k["open"]),
+                high_price=float(k["high"]),
+                low_price=float(k["low"]),
+                close_price=float(k["close"]),
+                base_volume=float(k["volume"]),
+                quote_volume=float(k["quote_volume"]),
+                is_closed=True,
+            )
 
-            open_price=float(payload["open"]),
-            high_price=float(payload["high"]),
-            low_price=float(payload["low"]),
-            close_price=float(payload["close"]),
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["symbol", "open_time"],
+                set_={
+                    "close_price": stmt.excluded.close_price,
+                    "high_price": stmt.excluded.high_price,
+                    "low_price": stmt.excluded.low_price,
+                    "base_volume": stmt.excluded.base_volume,
+                    "quote_volume": stmt.excluded.quote_volume,
+                },
+            )
 
-            base_volume=float(payload["volume"]),
-            quote_volume=float(payload["quote_volume"]),
-
-            is_closed=is_closed
-        )
-
-        session.add(obj)
-        session.commit()
-
-        print("💾 INSERTED:", payload["pair"], payload["open_time"])
-        return obj
-
-    except IntegrityError:
-        session.rollback()
-        print("⚠️ Duplicate candle ignored")
-
-    except Exception as e:
-        session.rollback()
-        print("❌ DB error:", e)
-        raise
-
-    finally:
-        session.close()
+            conn.execute(stmt)

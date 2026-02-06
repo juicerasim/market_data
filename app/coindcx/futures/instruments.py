@@ -1,8 +1,8 @@
 INSTRUMENTS = [
      "B-SOL_USDT",
-      #  "B-RIVER_USDT",
-      #    "B-BTC_USDT",
-      #      "B-PIPPIN_USDT",
+      "B-RIVER_USDT",
+      "B-BTC_USDT",
+      "B-PIPPIN_USDT",
 ]
 ALL_INSTRUMENTS = [
   "B-PORTAL_USDT",

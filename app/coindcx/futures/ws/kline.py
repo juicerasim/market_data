@@ -4,7 +4,7 @@ import time
 
 from app.coindcx.futures.instruments import INSTRUMENTS
 from app.coindcx.futures.ws.db_worker import CDX_DB_QUEUE, start_db_worker
-from app.coindcx.futures.ws.tf_aggregator import aggregate   # ⭐ only addition
+from app.coindcx.futures.ws.tf_aggregator import aggregate
 
 socketEndpoint = "wss://stream.coindcx.com"
 TF = "1m"
@@ -57,13 +57,12 @@ def on_candlestick(response):
     if open_time != last_open:
         closed_candle = CANDLE_STATE[symbol]["last_candle"]
 
-        print("✅ Previous candle CLOSED")
-        print(closed_candle)
+        print("✅ Previous candle CLOSED", closed_candle["pair"], closed_candle["open_time"])
 
-        # ⭐ original behaviour preserved
+        # enqueue 1m
         CDX_DB_QUEUE.put((closed_candle, True))
 
-        # ⭐ ONLY addition: build higher TF candles
+        # enqueue aggregated TF candles
         agg_candles = aggregate(symbol, closed_candle)
         for agg in agg_candles:
             CDX_DB_QUEUE.put((agg, True))

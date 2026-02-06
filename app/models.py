@@ -37,7 +37,7 @@ class CDXCandleBase:
     is_closed = Column(Boolean, nullable=False, default=False)
 
     # optional tracking
-    event_time = Column(BigInteger, nullable=True)
+    # event_time = Column(BigInteger, nullable=True)
 
 
 

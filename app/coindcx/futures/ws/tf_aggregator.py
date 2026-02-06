@@ -6,6 +6,7 @@ TF_BUCKET = {
 }
 
 AGG_STATE = {}
+INITIALIZED_SYMBOLS = set()
 
 
 def get_bucket_open(open_time, minutes):
@@ -20,6 +21,19 @@ def aggregate(symbol, candle):
 
         bucket_open = get_bucket_open(candle["open_time"], size)
         key = (symbol, tf)
+
+        # ⭐ restart-safe alignment
+        if symbol not in INITIALIZED_SYMBOLS:
+            AGG_STATE[key] = {
+                "open_time": bucket_open,
+                "open": float(candle["open"]),
+                "high": float(candle["high"]),
+                "low": float(candle["low"]),
+                "close": float(candle["close"]),
+                "volume": float(candle["volume"]),
+                "quote_volume": float(candle["quote_volume"]),
+            }
+            continue
 
         if key not in AGG_STATE:
             AGG_STATE[key] = {
@@ -69,5 +83,7 @@ def aggregate(symbol, candle):
             agg["close"] = float(candle["close"])
             agg["volume"] += float(candle["volume"])
             agg["quote_volume"] += float(candle["quote_volume"])
+
+    INITIALIZED_SYMBOLS.add(symbol)
 
     return results

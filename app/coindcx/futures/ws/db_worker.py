@@ -1,8 +1,7 @@
 from queue import Queue
 from threading import Thread
-from app.repository.cdx_repo import insert_cdx_candle
+from app.repository.cdx_repo import upsert_klines
 
-# ⭐ global queue
 CDX_DB_QUEUE = Queue(maxsize=10000)
 
 
@@ -10,13 +9,10 @@ def db_worker():
     print("🚀 DB worker started")
 
     while True:
-        try:
-            payload, is_closed = CDX_DB_QUEUE.get(timeout=60)
-        except:
-            continue
+        payload, is_closed = CDX_DB_QUEUE.get()
 
         try:
-            insert_cdx_candle(payload, is_closed)
+            upsert_klines([payload])
         except Exception as e:
             print("❌ Worker insert error:", e)
 
