@@ -2,6 +2,7 @@ from sqlalchemy.exc import IntegrityError
 from app.db import SessionLocal
 from app.models import CDXCandle1M
 
+# duration → model map
 CDX_MODEL_MAP = {
     "1m": CDXCandle1M,
 }

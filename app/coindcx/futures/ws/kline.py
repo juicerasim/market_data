@@ -1,9 +1,9 @@
 import socketio
 import json
-from app.coindcx.futures.instruments import INSTRUMENTS
-from app.repository.cdx_repo import insert_cdx_candle
-from app.coindcx.futures.ws.db_worker import CDX_DB_QUEUE, start_db_worker
+import time
 
+from app.coindcx.futures.instruments import INSTRUMENTS
+from app.coindcx.futures.ws.db_worker import CDX_DB_QUEUE, start_db_worker
 
 socketEndpoint = "wss://stream.coindcx.com"
 TF = "1m"
@@ -13,13 +13,17 @@ CANDLE_STATE = {}
 
 sio = socketio.Client(
     logger=True,
-    engineio_logger=False
+    engineio_logger=False,
+    reconnection=True,
+    reconnection_attempts=0,
+    reconnection_delay=3,
 )
 
 
 @sio.event
 def connect():
     print("✅ Connected!")
+
     for instrument in INSTRUMENTS:
         channel = f"{instrument}_{TF}-futures"
         print(channel)
@@ -40,9 +44,9 @@ def on_candlestick(response):
     candle = data["data"][0]
     symbol = candle["pair"]
 
-    open_time = candle["open_time"]  # ⭐ keep as BIGINT
+    open_time = candle["open_time"]
 
-    # ⭐ Initialize state for new symbol
+    # ⭐ Initialize state
     if symbol not in CANDLE_STATE:
         CANDLE_STATE[symbol] = {
             "last_open_time": open_time,
@@ -52,20 +56,22 @@ def on_candlestick(response):
 
     last_open = CANDLE_STATE[symbol]["last_open_time"]
 
-    # ⭐ NEW CANDLE ARRIVED -> PREVIOUS IS CLOSED
+    # ⭐ Candle closed detection
     if open_time != last_open:
         closed_candle = CANDLE_STATE[symbol]["last_candle"]
 
         print("✅ Previous candle CLOSED")
         print(closed_candle)
 
-        # ⭐ GENERIC INSERT
-        CDX_DB_QUEUE.put((closed_candle, True))
-
+        # ⭐ Non-blocking queue push
+        try:
+            CDX_DB_QUEUE.put_nowait((closed_candle, True))
+        except:
+            print("⚠️ DB queue full, candle dropped:", symbol)
 
         CANDLE_STATE[symbol]["last_open_time"] = open_time
 
-    # always update latest candle snapshot
+    # update latest snapshot
     CANDLE_STATE[symbol]["last_candle"] = candle
 
 
@@ -81,8 +87,20 @@ def disconnect():
 
 def main():
     start_db_worker()
-    sio.connect(socketEndpoint, transports=["websocket"])
-    sio.wait()
+
+    while True:
+        try:
+            if not sio.connected:
+                print("🔌 Connecting to CoinDCX stream...")
+                sio.connect(socketEndpoint, transports=["websocket"])
+
+            sio.wait()
+
+        except Exception as e:
+            print("❌ Connection error:", e)
+
+        print("⏳ Reconnecting in 5 seconds...")
+        time.sleep(5)
 
 
 if __name__ == "__main__":

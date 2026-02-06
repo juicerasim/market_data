@@ -10,7 +10,10 @@ def db_worker():
     print("🚀 DB worker started")
 
     while True:
-        payload, is_closed = CDX_DB_QUEUE.get()
+        try:
+            payload, is_closed = CDX_DB_QUEUE.get(timeout=60)
+        except:
+            continue
 
         try:
             insert_cdx_candle(payload, is_closed)

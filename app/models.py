@@ -49,36 +49,36 @@ class CDXCandle1M(CDXCandleBase, Base):
     )
 
 
-# class CDXCandle15M(CDXCandleBase, Base):
-#     __tablename__ = "cdx_candles_15m"
-#     __table_args__ = (
-#         UniqueConstraint("symbol", "open_time", name="uq_cdx_15m_symbol_time"),
-#         Index("ix_cdx_15m_symbol_time", "symbol", "open_time"),
-#     )
+class CDXCandle15M(CDXCandleBase, Base):
+    __tablename__ = "cdx_candles_15m"
+    __table_args__ = (
+        UniqueConstraint("symbol", "open_time", name="uq_cdx_15m_symbol_time"),
+        Index("ix_cdx_15m_symbol_time", "symbol", "open_time"),
+    )
 
 
-# class CDXCandle1H(CDXCandleBase, Base):
-#     __tablename__ = "cdx_candles_1h"
-#     __table_args__ = (
-#         UniqueConstraint("symbol", "open_time", name="uq_cdx_1h_symbol_time"),
-#         Index("ix_cdx_1h_symbol_time", "symbol", "open_time"),
-#     )
+class CDXCandle1H(CDXCandleBase, Base):
+    __tablename__ = "cdx_candles_1h"
+    __table_args__ = (
+        UniqueConstraint("symbol", "open_time", name="uq_cdx_1h_symbol_time"),
+        Index("ix_cdx_1h_symbol_time", "symbol", "open_time"),
+    )
 
 
-# class CDXCandle4H(CDXCandleBase, Base):
-#     __tablename__ = "cdx_candles_4h"
-#     __table_args__ = (
-#         UniqueConstraint("symbol", "open_time", name="uq_cdx_4h_symbol_time"),
-#         Index("ix_cdx_4h_symbol_time", "symbol", "open_time"),
-#     )
+class CDXCandle4H(CDXCandleBase, Base):
+    __tablename__ = "cdx_candles_4h"
+    __table_args__ = (
+        UniqueConstraint("symbol", "open_time", name="uq_cdx_4h_symbol_time"),
+        Index("ix_cdx_4h_symbol_time", "symbol", "open_time"),
+    )
 
 
-# class CDXCandle1D(CDXCandleBase, Base):
-#     __tablename__ = "cdx_candles_1d"
-#     __table_args__ = (
-#         UniqueConstraint("symbol", "open_time", name="uq_cdx_1d_symbol_time"),
-#         Index("ix_cdx_1d_symbol_time", "symbol", "open_time"),
-#     )
+class CDXCandle1D(CDXCandleBase, Base):
+    __tablename__ = "cdx_candles_1d"
+    __table_args__ = (
+        UniqueConstraint("symbol", "open_time", name="uq_cdx_1d_symbol_time"),
+        Index("ix_cdx_1d_symbol_time", "symbol", "open_time"),
+    )
 
 
 
