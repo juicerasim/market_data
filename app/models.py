@@ -8,6 +8,7 @@ from app.base import Base
 from sqlalchemy import (
     Column, BigInteger, Integer, String, Float, Boolean
 )
+from sqlalchemy.sql import func
 
 
 class CDXCandleBase:
@@ -36,8 +37,11 @@ class CDXCandleBase:
     # derived internally from stream logic
     is_closed = Column(Boolean, nullable=False, default=False)
 
-    # optional tracking
-    event_time = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+    DateTime(timezone=True),
+    nullable=True,
+    server_default=func.now()   # ⭐ ADD THIS
+)
 
 
 
