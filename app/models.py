@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, BigInteger, Integer, String, Float, Boolean,
-    Index, UniqueConstraint
+    Index, UniqueConstraint, DateTime
 )
 from app.base import Base
 
@@ -37,7 +37,7 @@ class CDXCandleBase:
     is_closed = Column(Boolean, nullable=False, default=False)
 
     # optional tracking
-    # event_time = Column(BigInteger, nullable=True)
+    event_time = Column(DateTime(timezone=True), nullable=True)
 
 
 
