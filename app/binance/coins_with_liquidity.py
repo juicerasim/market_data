@@ -57,7 +57,7 @@ def get_top_liquid_coins(percent=0.20):
 
 if __name__ == "__main__":
     while True:
-        coins = get_top_liquid_coins(0.30)
+        coins = get_top_liquid_coins(0.20)
 
         redis_client.set("liquid_coins", json.dumps(coins))
 
@@ -66,8 +66,5 @@ if __name__ == "__main__":
 
         print("Top1 Liquid Coins:", json_data_coins)
         print("Total:", len(json_data_coins))
-
-        keys = redis_client.keys("*")
-        print(keys)
 
         time.sleep(600)
