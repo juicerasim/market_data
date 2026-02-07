@@ -23,9 +23,5 @@ def handle(k, event_time):
         "trade_count": k["n"],
         "is_closed": k["x"],
     }
-    print("===================")
-    print(payload)
-    print("===================")
 
-    # ⭐ push to queue instead of DB
     candle_queue.put(("1m", payload))

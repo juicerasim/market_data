@@ -1,17 +1,8 @@
-from sqlalchemy.dialects.postgresql import insert
 from app.db import SessionLocal
+from app.models import Candle1M, Candle15M, Candle1H, Candle4H, Candle1D
 
 
-from app.models import (
-    Candle1M,
-    Candle15M,
-    Candle1H,
-    Candle4H,
-    Candle1D,
-)
-
-# ⭐ TF → ORM Model
-CANDLE_MODEL_MAP = {
+MODEL_MAP = {
     "1m": Candle1M,
     "15m": Candle15M,
     "1h": Candle1H,
@@ -20,30 +11,26 @@ CANDLE_MODEL_MAP = {
 }
 
 
-def insert_candle(tf: str, payload: dict):
-    """
-    Generic candle insert supporting all timeframes.
-    Uses composite PK (symbol, open_time).
-    Safe for websocket streaming.
-    """
+def insert_candle(tf, payload):
+    print("====1==payload========")
+    print(payload)
+    print("====1==========")
+    Model = MODEL_MAP.get(tf)
 
-    model = CANDLE_MODEL_MAP.get(tf)
-
-    if not model:
-        raise ValueError(f"Unsupported timeframe: {tf}")
+    if not Model:
+        return
 
     db = SessionLocal()
 
     try:
-        stmt = insert(model).values(**payload)
+        obj = Model(**payload)
 
-        # ⭐ Avoid duplicate insert crash
-        stmt = stmt.on_conflict_do_nothing(
-            index_elements=["symbol", "open_time"]
-        )
-
-        db.execute(stmt)
+        db.merge(obj)  # ⭐ UPSERT SAFE (composite key)
         db.commit()
+
+    except Exception as e:
+        db.rollback()
+        print("Insert failed:", e)
 
     finally:
         db.close()

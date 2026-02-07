@@ -5,13 +5,14 @@ import threading
 
 from app.redis_client import redis_client
 from app.binance.ws.handlers import kline_handler
+from app.binance.ws.db_worker import run as db_run
 
 BASE_URL = "wss://fstream.binance.com/ws"
 REDIS_KEY = "liquid_coins"
 
 ws_app = None
 
-# ⭐ Maintain BOTH list + set
+# ⭐ maintain both list + set
 current_symbols_list = []
 current_symbols_set = set()
 
@@ -24,13 +25,12 @@ request_id = 1
 def get_symbols():
     data = redis_client.get(REDIS_KEY)
 
-
     if not data:
         return []
 
     coins = json.loads(data)
 
-    # ⭐ protection if someone pushed single string
+    # safety if single string pushed
     if isinstance(coins, str):
         return [coins]
 
@@ -43,7 +43,6 @@ def get_symbols():
 def subscribe_symbols(ws, symbols):
     global request_id
 
-    # ⭐ Safety guard
     if isinstance(symbols, str):
         symbols = [symbols]
 
@@ -95,11 +94,11 @@ def unsubscribe_symbols(ws, symbols):
 def on_message(ws, message):
     msg = json.loads(message)
 
-    # Ignore subscribe response
+    # Ignore subscribe responses
     if "result" in msg:
         return
 
-    # ⭐ RAW stream sends kline directly
+    # RAW kline stream sends payload directly
     if "e" not in msg:
         return
 
@@ -169,6 +168,10 @@ def watch_symbols():
 def run():
     global ws_app
 
+    # ⭐ IMPORTANT FIX:
+    # Start DB worker as THREAD (same process)
+    threading.Thread(target=db_run, daemon=True).start()
+
     ws_app = websocket.WebSocketApp(
         BASE_URL,
         on_message=on_message,
@@ -177,7 +180,7 @@ def run():
         on_close=on_close
     )
 
-    # watcher thread
+    # Watch Redis for updates
     threading.Thread(target=watch_symbols, daemon=True).start()
 
     ws_app.run_forever()

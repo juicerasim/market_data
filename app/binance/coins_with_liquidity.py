@@ -55,7 +55,6 @@ def get_top_liquid_coins(percent=0.20):
 
     # ⭐ RETURN CLEAN LIST ONLY
     result = [c["symbol"] for c in parsed[:top_n]]
-    print(result)
     return result
 
 

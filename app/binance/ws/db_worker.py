@@ -1,15 +1,18 @@
-import time
-from app.binance.repo import insert_candle
 from app.binance.ws.queue import candle_queue
+from app.binance.repo import insert_candle
+import json
 
 
 def run():
-    print("DB Worker Started")
+    print("🔥 DB Worker started...")
 
     while True:
-        try:
-            tf, payload = candle_queue.get(timeout=1)
-            insert_candle(tf, payload)
 
-        except Exception:
-            time.sleep(0.1)
+        tf, payload = candle_queue.get()
+
+
+        insert_candle(tf, payload)
+
+
+if __name__ == "__main__":
+    run()

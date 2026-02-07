@@ -6,7 +6,6 @@ import time
 WORKERS = [
     "app.binance.coins_with_liquidity",
     "app.binance.ws.ws_engine",
-    # "app.binance.ws.db_worker",
 ]
 
 def start_worker(module_name):
