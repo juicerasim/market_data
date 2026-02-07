@@ -10,54 +10,42 @@ BASE_URL = "wss://fstream.binance.com/ws"
 REDIS_KEY = "liquid_coins"
 
 ws_app = None
-current_symbols = set()
+
+# ⭐ Maintain BOTH list + set
+current_symbols_list = []
+current_symbols_set = set()
+
 request_id = 1
 
 
-# -----------------------------
-# Redis Symbols
-# -----------------------------
+# --------------------------------------------------
+# Load symbols from Redis (ORDER PRESERVED)
+# --------------------------------------------------
 def get_symbols():
     data = redis_client.get(REDIS_KEY)
 
+
     if not data:
-        return set()
+        return []
 
     coins = json.loads(data)
-    return set(coins.keys())
+
+    # ⭐ protection if someone pushed single string
+    if isinstance(coins, str):
+        return [coins]
+
+    return coins
 
 
-# -----------------------------
-# WS Events
-# -----------------------------
-def on_message(ws, message):
-    msg = json.loads(message)
-
-    # Binance sends control responses too
-    if "data" in msg:
-        kline_handler.handle(msg["data"])
-
-
-def on_open(ws):
-    print("WS Connected")
-
-    # subscribe initial symbols
-    subscribe_symbols(ws, current_symbols)
-
-
-def on_error(ws, error):
-    print("WS Error:", error)
-
-
-def on_close(ws, a, b):
-    print("WS Closed")
-
-
-# -----------------------------
-# Live Subscribe / Unsubscribe
-# -----------------------------
+# --------------------------------------------------
+# Subscribe helpers
+# --------------------------------------------------
 def subscribe_symbols(ws, symbols):
     global request_id
+
+    # ⭐ Safety guard
+    if isinstance(symbols, str):
+        symbols = [symbols]
 
     if not symbols:
         return
@@ -72,13 +60,16 @@ def subscribe_symbols(ws, symbols):
 
     request_id += 1
 
-    print("SUBSCRIBE:", params)
+    print("Sending SUBSCRIBE:", params[:20], "... total:", len(params))
 
     ws.send(json.dumps(payload))
 
 
 def unsubscribe_symbols(ws, symbols):
     global request_id
+
+    if isinstance(symbols, str):
+        symbols = [symbols]
 
     if not symbols:
         return
@@ -93,49 +84,90 @@ def unsubscribe_symbols(ws, symbols):
 
     request_id += 1
 
-    print("UNSUBSCRIBE:", params[:5], "...")
+    print("Sending UNSUBSCRIBE:", params[:20])
 
     ws.send(json.dumps(payload))
 
 
-# -----------------------------
-# Symbol Watcher (NO RECONNECT)
-# -----------------------------
+# --------------------------------------------------
+# WS EVENTS
+# --------------------------------------------------
+def on_message(ws, message):
+    msg = json.loads(message)
+
+    # Ignore subscribe response
+    if "result" in msg:
+        return
+
+    # ⭐ RAW stream sends kline directly
+    if "e" not in msg:
+        return
+
+    kline_handler.handle(msg)
+
+
+def on_open(ws):
+    global current_symbols_list, current_symbols_set
+
+    print("WS Connected")
+
+    current_symbols_list = get_symbols()
+    current_symbols_set = set(current_symbols_list)
+
+    print("Initial symbols:", current_symbols_list[:20])
+
+    subscribe_symbols(ws, current_symbols_list)
+
+
+def on_error(ws, error):
+    print("WS Error:", error)
+
+
+def on_close(ws, a, b):
+    print("WS Closed")
+
+
+# --------------------------------------------------
+# Watch Redis for Symbol Updates
+# --------------------------------------------------
 def watch_symbols():
-    global current_symbols, ws_app
+    global current_symbols_list, current_symbols_set, ws_app
 
     while True:
         time.sleep(15)
 
-        new_symbols = get_symbols()
-
         if not ws_app:
             continue
 
-        to_add = new_symbols - current_symbols
-        to_remove = current_symbols - new_symbols
+        new_list = get_symbols()
+        new_set = set(new_list)
+
+        to_add = new_set - current_symbols_set
+        to_remove = current_symbols_set - new_set
 
         if to_add:
-            subscribe_symbols(ws_app, to_add)
+            subscribe_symbols(ws_app, list(to_add))
 
         if to_remove:
-            unsubscribe_symbols(ws_app, to_remove)
+            unsubscribe_symbols(ws_app, list(to_remove))
 
         if to_add or to_remove:
-            print("Symbol update:",
-                  "ADD", len(to_add),
-                  "REMOVE", len(to_remove))
+            print(
+                "Symbol Update → ADD:",
+                len(to_add),
+                "REMOVE:",
+                len(to_remove)
+            )
 
-        current_symbols = new_symbols
+        current_symbols_list = new_list
+        current_symbols_set = new_set
 
 
-# -----------------------------
-# Run Socket
-# -----------------------------
+# --------------------------------------------------
+# RUN SOCKET
+# --------------------------------------------------
 def run():
-    global ws_app, current_symbols
-
-    current_symbols = get_symbols()
+    global ws_app
 
     ws_app = websocket.WebSocketApp(
         BASE_URL,

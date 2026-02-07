@@ -34,37 +34,42 @@ def get_top_liquid_coins(percent=0.20):
     parsed = []
 
     for t in tickers:
-        if not t["symbol"].endswith("USDT"):
+        symbol = t["symbol"]
+
+        # ⭐ CLEANING MOVED HERE (source of truth)
+        if not symbol.isascii():
+            continue
+
+        if not symbol.endswith("USDT"):
             continue
 
         parsed.append({
-            "symbol": t["symbol"],
+            "symbol": symbol,
             "q": float(t["quoteVolume"])
         })
 
+    # ⭐ sort by liquidity
     parsed.sort(key=lambda x: x["q"], reverse=True)
 
     top_n = int(len(parsed) * percent)
 
-    # ⭐ convert to {'BTC': q} format
-    result = {
-        c["symbol"].replace("USDT", ""): c["q"]
-        for c in parsed[:top_n]
-    }
-
+    # ⭐ RETURN CLEAN LIST ONLY
+    result = [c["symbol"] for c in parsed[:top_n]]
+    print(result)
     return result
+
 
 
 if __name__ == "__main__":
     while True:
-        coins = get_top_liquid_coins(0.20)
+        coins = get_top_liquid_coins(0.10)
 
         redis_client.set("liquid_coins", json.dumps(coins))
 
         moving_coins = redis_client.get("liquid_coins")
         json_data_coins = json.loads(moving_coins)
 
-        print("Top1 Liquid Coins:", json_data_coins)
+        # print("Top1 Liquid Coins:", json_data_coins)
         print("Total:", len(json_data_coins))
 
         time.sleep(600)
