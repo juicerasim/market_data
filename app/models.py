@@ -99,6 +99,7 @@ class CDXCandle1D(CDXCandleBase, Base):
 # -------------------------------------------------
 class CandleBase:
     # event info
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
     event_time = Column(BigInteger, nullable=False)
 
     symbol = Column(String(20), nullable=False)
