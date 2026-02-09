@@ -26,8 +26,8 @@ def handle(k, event_time):
         "is_closed": k["x"],
     }
 
-    candle_queue.put((k["i"], payload))
     try:
         candle_queue.put_nowait((k["i"], payload))
+        print(f"[QUEUE] Added → {k['s']} {k['i']}")
     except Full:
-        print(f"⚠️ Queue Full! Dropping candle for {k['s']} {k['i']}")
+        print(f"[QUEUE] FULL → Dropping {k['s']} {k['i']}")

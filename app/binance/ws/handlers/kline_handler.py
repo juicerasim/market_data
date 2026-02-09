@@ -1,25 +1,21 @@
-from app.binance.ws.handlers.tf import tf_1m
+from app.binance.ws.handlers.tf import candle_common
 
-# ⭐ TF → handler mapping
 TF_MAP = {
-    "1m": tf_1m.handle,
-    "15m": tf_1m.handle,
-    "1h": tf_1m.handle,
-    "4h": tf_1m.handle,
-    "1d": tf_1m.handle,
+    "1m": candle_common.handle,
+    "15m": candle_common.handle,
+    "1h": candle_common.handle,
+    "4h": candle_common.handle,
+    "1d": candle_common.handle,
 }
 
 
 def handle(data):
-    # Binance kline payload
     k = data["k"]
     event_time = data["E"]
-
     tf = k["i"]
 
     handler = TF_MAP.get(tf)
-
     if handler:
-        handler(k, event_time)   # ⭐ PASS BOTH PARAMS
+        handler(k, event_time)
     else:
-        print(f"No TF handler for {tf}")
+        print(f"No handler for TF {tf}")

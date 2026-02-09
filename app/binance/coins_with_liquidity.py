@@ -1,75 +1,39 @@
-
-"""
-Worker: Binance Liquidity Snapshot
-
-Fetch 24h futures ticker data, select top liquid coins,
-and store snapshot in Redis (key: liquid_coins). update after evry 10 min.
-
-Reads: Binance API
-Writes: Redis
-Runs: Background worker
-"""
-
 import requests
 import time
-from app.redis_client import redis_client
 import json
+from app.redis_client import redis_client
 
-BASE_URL = "https://fapi.binance.com"
-ENDPOINT = "/fapi/v1/ticker/24hr"
-
-session = requests.Session()
+BASE_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
 
 
-def fetch_all_market_tickers():
-    url = BASE_URL + ENDPOINT
-    # ⚠️ SECURITY: Enable SSL verification (default True for requests)
-    response = session.get(url, timeout=10, verify=True)
-    response.raise_for_status()
-    return response.json()
-
-
-def get_top_liquid_coins(percent=0.20):
-    tickers = fetch_all_market_tickers()
+def get_top_liquid_coins(percent=0.10):
+    print("[LIQ] Fetching market tickers...")
+    r = requests.get(BASE_URL, timeout=10)
+    r.raise_for_status()
 
     parsed = []
-
-    for t in tickers:
+    for t in r.json():
         symbol = t["symbol"]
+        if symbol.endswith("USDT") and symbol.isascii():
+            parsed.append((symbol, float(t["quoteVolume"])))
 
-        # ⭐ CLEANING MOVED HERE (source of truth)
-        if not symbol.isascii():
-            continue
-
-        if not symbol.endswith("USDT"):
-            continue
-
-        parsed.append({
-            "symbol": symbol,
-            "q": float(t["quoteVolume"])
-        })
-
-    # ⭐ sort by liquidity
-    parsed.sort(key=lambda x: x["q"], reverse=True)
-
+    parsed.sort(key=lambda x: x[1], reverse=True)
     top_n = int(len(parsed) * percent)
 
-    # ⭐ RETURN CLEAN LIST ONLY
-    result = [c["symbol"] for c in parsed[:top_n]]
+    result = [s for s, _ in parsed[:top_n]]
+    print(f"[LIQ] Selected {len(result)} liquid symbols")
     return result
 
 
-
 if __name__ == "__main__":
+    print("[LIQ] Liquidity worker started")
+
     while True:
-        coins = get_top_liquid_coins(0.10)
-
-        redis_client.set("liquid_coins", json.dumps(coins))
-
-        moving_coins = redis_client.get("liquid_coins")
-        json_data_coins = json.loads(moving_coins)
-
-        # print("Top1 Liquid Coins:", json_data_coins)
-        print("Total:", len(json_data_coins))
+        try:
+            coins = get_top_liquid_coins()
+            redis_client.set("liquid_coins", json.dumps(coins))
+            print(f"[LIQ] Redis updated with {len(coins)} symbols")
+        except Exception as e:
+            print("[LIQ] ERROR:", e)
 
         time.sleep(600)
