@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, BigInteger, Integer, String, Float, Boolean,
-    Index, UniqueConstraint, DateTime
+    Index, UniqueConstraint, DateTime, Identity
 )
 from app.base import Base
 
@@ -99,7 +99,12 @@ class CDXCandle1D(CDXCandleBase, Base):
 # -------------------------------------------------
 class CandleBase:
     # event info
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(
+    BigInteger,
+    Identity(always=True),   # ⭐ THIS enables auto increment
+    unique=True,
+    index=True
+)
     event_time = Column(BigInteger, nullable=False)
     interval = Column(String(20), nullable=True)
 

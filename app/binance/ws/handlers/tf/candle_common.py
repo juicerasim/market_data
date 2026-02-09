@@ -1,5 +1,5 @@
 from queue import Full
-from app.binance.ws.queue import candle_queue
+from app.binance.ws.queue import candle_queue, QUEUE_MAXSIZE
 
 
 def handle(k, event_time):
@@ -28,6 +28,11 @@ def handle(k, event_time):
 
     try:
         candle_queue.put_nowait((k["i"], payload))
-        print(f"[QUEUE] Added → {k['s']} {k['i']}")
+        size = candle_queue.qsize()
+        percent = int((size / QUEUE_MAXSIZE) * 100)
+        percent = (size / QUEUE_MAXSIZE) * 100
+        print(f"[QUEUE] Added → {k['s']} {k['i']} | {size}/{QUEUE_MAXSIZE} ({percent:.2f}%)")
+
+
     except Full:
         print(f"[QUEUE] FULL → Dropping {k['s']} {k['i']}")

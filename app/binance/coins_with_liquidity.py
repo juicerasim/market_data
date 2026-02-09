@@ -22,6 +22,7 @@ def get_top_liquid_coins(percent=0.10):
 
     result = [s for s, _ in parsed[:top_n]]
     print(f"[LIQ] Selected {len(result)} liquid symbols")
+    print(f"[LIQ] Selected  liquid symbols: {result}")
     return result
 
 

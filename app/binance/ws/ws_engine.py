@@ -17,7 +17,8 @@ RUNNING = True
 current_symbols_list = []
 current_symbols_set = set()
 
-INTERVALS = ["1m", "15m", "1h", "4h", "1d"]
+# INTERVALS = ["1m", "15m", "1h", "4h", "1d"]
+INTERVALS = ["1m"]
 request_id = 1
 
 
