@@ -16,6 +16,9 @@ ws_app = None
 current_symbols_list = []
 current_symbols_set = set()
 
+# Timeframes to subscribe to
+INTERVALS = ["1m", "15m", "1h", "4h", "1d"]
+
 request_id = 1
 
 
@@ -49,7 +52,7 @@ def subscribe_symbols(ws, symbols):
     if not symbols:
         return
 
-    params = [f"{s.lower()}@kline_1m" for s in symbols]
+    params = [f"{s.lower()}@kline_{tf}" for s in symbols for tf in INTERVALS]
 
     payload = {
         "method": "SUBSCRIBE",
@@ -73,7 +76,7 @@ def unsubscribe_symbols(ws, symbols):
     if not symbols:
         return
 
-    params = [f"{s.lower()}@kline_1m" for s in symbols]
+    params = [f"{s.lower()}@kline_{tf}" for s in symbols for tf in INTERVALS]
 
     payload = {
         "method": "UNSUBSCRIBE",

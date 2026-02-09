@@ -3,6 +3,10 @@ from app.binance.ws.handlers.tf import tf_1m
 # ⭐ TF → handler mapping
 TF_MAP = {
     "1m": tf_1m.handle,
+    "15m": tf_1m.handle,
+    "1h": tf_1m.handle,
+    "4h": tf_1m.handle,
+    "1d": tf_1m.handle,
 }
 
 

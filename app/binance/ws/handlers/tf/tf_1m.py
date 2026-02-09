@@ -9,6 +9,7 @@ def handle(k, event_time):
         "event_time": event_time,
         "symbol": k["s"],
         "open_time": k["t"],
+        "interval": k["i"],
         "close_time": k["T"],
         "first_trade_id": k["f"],
         "last_trade_id": k["L"],
@@ -24,4 +25,4 @@ def handle(k, event_time):
         "is_closed": k["x"],
     }
 
-    candle_queue.put(("1m", payload))
+    candle_queue.put((k["i"], payload))

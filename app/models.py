@@ -101,6 +101,7 @@ class CandleBase:
     # event info
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     event_time = Column(BigInteger, nullable=False)
+    interval = Column(String(20), nullable=True)
 
     symbol = Column(String(20), nullable=False)
     open_time = Column(BigInteger, nullable=False)

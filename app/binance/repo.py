@@ -12,9 +12,6 @@ MODEL_MAP = {
 
 
 def insert_candle(tf, payload):
-    print("====1==payload========")
-    print(payload)
-    print("====1==========")
     Model = MODEL_MAP.get(tf)
 
     if not Model:

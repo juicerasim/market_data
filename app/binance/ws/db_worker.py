@@ -8,10 +8,11 @@ def run():
 
     while True:
 
-        tf, payload = candle_queue.get()
-
-
-        insert_candle(tf, payload)
+        try:
+            tf, payload = candle_queue.get()
+            insert_candle(tf, payload)
+        except Exception as e:
+            print(f"Error inserting candle: {e}")
 
 
 if __name__ == "__main__":
