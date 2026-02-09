@@ -34,3 +34,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# pkill -9 -f app.main
+# run with: poetry run python -m app.main
