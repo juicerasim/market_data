@@ -1,3 +1,4 @@
+from queue import Full
 from app.binance.ws.queue import candle_queue
 
 
@@ -26,3 +27,7 @@ def handle(k, event_time):
     }
 
     candle_queue.put((k["i"], payload))
+    try:
+        candle_queue.put_nowait((k["i"], payload))
+    except Full:
+        print(f"⚠️ Queue Full! Dropping candle for {k['s']} {k['i']}")

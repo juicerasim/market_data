@@ -23,7 +23,8 @@ session = requests.Session()
 
 def fetch_all_market_tickers():
     url = BASE_URL + ENDPOINT
-    response = session.get(url, timeout=10)
+    # ⚠️ SECURITY: Enable SSL verification (default True for requests)
+    response = session.get(url, timeout=10, verify=True)
     response.raise_for_status()
     return response.json()
 

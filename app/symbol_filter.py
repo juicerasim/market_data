@@ -8,7 +8,8 @@ TOP_N = 50
 
 
 def get_strong_symbols():
-    resp = requests.get(TICKER_24H_URL, timeout=10)
+    # ⚠️ SECURITY: Enable SSL verification (default True for requests)
+    resp = requests.get(TICKER_24H_URL, timeout=10, verify=True)
     resp.raise_for_status()
     data = resp.json()
 

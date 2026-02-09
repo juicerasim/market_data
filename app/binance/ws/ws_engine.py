@@ -95,7 +95,15 @@ def unsubscribe_symbols(ws, symbols):
 # WS EVENTS
 # --------------------------------------------------
 def on_message(ws, message):
-    msg = json.loads(message)
+    try:
+        # ⚠️ SECURITY: Validate JSON parsing with error handling
+        msg = json.loads(message)
+    except json.JSONDecodeError as e:
+        print(f"Invalid JSON received: {e}")
+        return
+    except Exception as e:
+        print(f"Unexpected error parsing message: {e}")
+        return
 
     # Ignore subscribe responses
     if "result" in msg:
@@ -105,7 +113,10 @@ def on_message(ws, message):
     if "e" not in msg:
         return
 
-    kline_handler.handle(msg)
+    try:
+        kline_handler.handle(msg)
+    except Exception as e:
+        print(f"Error handling kline message: {e}")
 
 
 def on_open(ws):
@@ -175,18 +186,47 @@ def run():
     # Start DB worker as THREAD (same process)
     threading.Thread(target=db_run, daemon=True).start()
 
-    ws_app = websocket.WebSocketApp(
-        BASE_URL,
-        on_message=on_message,
-        on_open=on_open,
-        on_error=on_error,
-        on_close=on_close
-    )
-
     # Watch Redis for updates
     threading.Thread(target=watch_symbols, daemon=True).start()
 
-    ws_app.run_forever()
+    # ⭐ RECONNECTION WITH 5 SECOND DELAY
+    reconnect_delay = 5
+    max_retries = 10
+    retry_count = 0
+
+    while True:
+        try:
+            print(f"[WS] Connecting to {BASE_URL}...")
+            
+            ws_app = websocket.WebSocketApp(
+                BASE_URL,
+                on_message=on_message,
+                on_open=on_open,
+                on_error=on_error,
+                on_close=on_close
+            )
+
+            retry_count = 0  # Reset on successful connection
+            ws_app.run_forever()
+
+        except KeyboardInterrupt:
+            # ⭐ ALLOW CTRL+C TO WORK
+            print("\n[WS] Shutdown signal received. Closing...")
+            if ws_app:
+                ws_app.close()
+            break
+
+        except Exception as e:
+            print(f"[WS] Connection error: {e}")
+            
+            retry_count += 1
+            if retry_count > max_retries:
+                print(f"[WS] Max retries ({max_retries}) exceeded. Stopping.")
+                break
+
+            print(f"[WS] Reconnecting in {reconnect_delay} seconds... (attempt {retry_count}/{max_retries})")
+            time.sleep(reconnect_delay)
+            time.sleep(reconnect_delay)
 
 
 if __name__ == "__main__":
