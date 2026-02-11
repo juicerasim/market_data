@@ -105,16 +105,16 @@ class CandleBase:
     unique=True,
     index=True
 )
-    event_time = Column(BigInteger, nullable=False)
+    event_time = Column(BigInteger, nullable=True)
     interval = Column(String(20), nullable=True)
 
-    symbol = Column(String(20), nullable=False)
-    open_time = Column(BigInteger, nullable=False)
+    # symbol = Column(String(20), nullable=False)
+    # open_time = Column(BigInteger, nullable=False)
     close_time = Column(BigInteger, nullable=False)
 
     # trade id range
-    first_trade_id = Column(BigInteger, nullable=False)
-    last_trade_id = Column(BigInteger, nullable=False)
+    first_trade_id = Column(BigInteger, nullable=True)
+    last_trade_id = Column(BigInteger, nullable=True)
 
     # OHLC
     open_price = Column(Float, nullable=False)
@@ -131,7 +131,7 @@ class CandleBase:
 
     # stats
     trade_count = Column(Integer, nullable=False)
-    is_closed = Column(Boolean, nullable=False)
+    is_closed = Column(Boolean, nullable=True)
     created_at = Column(
     DateTime(timezone=True),
     nullable=True,
