@@ -1,21 +1,19 @@
 import requests
 import time
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from app.redis_client import redis_client
 from app.binance.scripts.insert import insert_candles_batch
-from app.binance.payload_builder import build_payloads  
+from app.binance.payload_builder import build_payloads
 
 URL = "https://fapi.binance.com/fapi/v1/klines"
 LIMIT = 500
 REDIS_KEY = "liquid_coins"
 
-# poetry run python -m app.binance.scripts.kline_history
-
 
 # --------------------------------------------------
-# Simple logger helper (UTC aware)
+# Logger
 # --------------------------------------------------
 def log(msg):
     now = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -23,8 +21,14 @@ def log(msg):
 
 
 # --------------------------------------------------
-# Convert ms timestamp → UTC readable
+# Helpers
 # --------------------------------------------------
+def datetime_to_ms(dt: datetime) -> int:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
 def ms_to_utc(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime(
         "%Y-%m-%d %H:%M:%S"
@@ -32,40 +36,23 @@ def ms_to_utc(ms):
 
 
 # --------------------------------------------------
-# Convert raw kline → readable dict list
-# --------------------------------------------------
-def normalize_klines(data):
-    result = []
-
-    for k in data:
-        result.append({
-            "open_time_utc": ms_to_utc(k[0]),
-            "close_time_utc": ms_to_utc(k[6]),
-            "open": k[1],
-            "high": k[2],
-            "low": k[3],
-            "close": k[4],
-            "volume": k[5],
-            "trades": k[8],
-        })
-
-    return result
-
-
-# --------------------------------------------------
 # Fetch klines
 # --------------------------------------------------
-def fetch_klines(symbol, tf, end_time=None):
+def fetch_klines(symbol, tf, start_time=None, end_time=None):
+
     params = {
         "symbol": symbol,
         "interval": tf,
         "limit": LIMIT,
     }
 
+    if start_time:
+        params["startTime"] = start_time
+
     if end_time:
         params["endTime"] = end_time
 
-    log(f"[API] Request → {symbol} tf={tf} end_time={end_time}")
+    log(f"[API] Request → {symbol} tf={tf} start={start_time} end={end_time}")
 
     resp = requests.get(URL, params=params, timeout=10)
     resp.raise_for_status()
@@ -74,20 +61,10 @@ def fetch_klines(symbol, tf, end_time=None):
 
     log(f"[API] Response ← {symbol} candles={len(data)}")
 
-    # ⭐ show UTC time range
     if data:
         oldest = data[0][0]
         newest = data[-1][0]
-        log(
-            f"[API] Time Range UTC → {ms_to_utc(oldest)}  →  {ms_to_utc(newest)}"
-        )
-
-        # ⭐ extra visibility
-        span = newest - oldest
-        log(f"[API] Window span(ms)={span}")
-
-    # ⭐ convert into readable format
-    # modified = normalize_klines(data)
+        log(f"[API] Time Range UTC → {ms_to_utc(oldest)} → {ms_to_utc(newest)}")
 
     return data
 
@@ -106,7 +83,6 @@ def get_symbols():
         return []
 
     coins = json.loads(data)
-
     log(f"[BACKFILL] Loaded {len(coins)} symbols from Redis")
 
     return coins
@@ -115,38 +91,59 @@ def get_symbols():
 # --------------------------------------------------
 # ROUND ROBIN BACKFILL ENGINE
 # --------------------------------------------------
-def backfill_all_symbols(tf, total_count):
+def backfill_all_symbols(tf, start_date=None, end_date=None):
+
+    now_utc = datetime.now(timezone.utc)
+
+    # --------------------------------------------------
+    # Resolve Date Range
+    # --------------------------------------------------
+    if start_date is None and end_date is None:
+        end_date = now_utc
+        start_date = now_utc - timedelta(days=365)
+
+    elif start_date is not None and end_date is None:
+        end_date = now_utc
+
+    elif start_date is None and end_date is not None:
+        start_date = end_date - timedelta(days=365)
+
+    # Ensure UTC
+    if start_date.tzinfo is None:
+        start_date = start_date.replace(tzinfo=timezone.utc)
+
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=timezone.utc)
+
+    # Safety swap if reversed
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    start_ts = datetime_to_ms(start_date)
+    end_ts   = datetime_to_ms(end_date)
 
     symbols = get_symbols()
     if not symbols:
         return
 
-    log(f"[START] TF={tf} LIMIT={LIMIT} target_per_symbol={total_count}")
+    log(f"[START] TF={tf} LIMIT={LIMIT}")
+    log(f"[START] Date Range UTC → {start_date} → {end_date}")
 
-    # ⭐ NEW LOGGING (no logic change)
-    log("--------------------------------------------------")
-    log(f"[CONFIG] Symbols count = {len(symbols)}")
-    log(f"[CONFIG] Total API calls per symbol ≈ {(total_count // LIMIT) + 1}")
-    log(f"[CONFIG] Estimated candles overall ≈ {len(symbols) * total_count}")
-    log("--------------------------------------------------")
-
-    # state per symbol
     state = {
         symbol: {
-            "end_time": None,
-            "processed": 0,
+            "cursor_end": end_ts,
             "done": False,
         }
         for symbol in symbols
     }
 
-    max_loops = (total_count // LIMIT) + 1
+    loop = 0
 
-    for loop in range(max_loops):
+    while True:
 
-        log(f"\n================ LOOP {loop+1}/{max_loops} ================")
+        loop += 1
+        log(f"\n================ LOOP {loop} ================")
 
-        # ⭐ NEW LOOP STATUS LOG
         active = sum(1 for v in state.values() if not v["done"])
         log(f"[LOOP STATUS] active_symbols={active} completed={len(symbols)-active}")
 
@@ -158,21 +155,12 @@ def backfill_all_symbols(tf, total_count):
                 log(f"[SKIP] {symbol} already completed")
                 continue
 
-            if info["processed"] >= total_count:
-                log(f"[DONE] Target reached for {symbol}")
-                info["done"] = True
-                continue
-
-            remaining = total_count - info["processed"]
-
-            log(
-                f"[FETCH] {symbol} "
-                f"processed={info['processed']}/{total_count} "
-                f"remaining≈{remaining} "
-                f"cursor={info['end_time']}"
+            klines = fetch_klines(
+                symbol,
+                tf,
+                start_time=start_ts,
+                end_time=info["cursor_end"],
             )
-
-            klines = fetch_klines(symbol, tf, info["end_time"])
 
             if not klines:
                 log(f"[END] No more history for {symbol}")
@@ -182,41 +170,28 @@ def backfill_all_symbols(tf, total_count):
             payloads = build_payloads(symbol, tf, klines)
 
             log(f"[DB] UPSERT START {symbol} rows={len(payloads)}")
-
             insert_candles_batch(tf, payloads)
 
             oldest_open_time = klines[0][0]
             newest_open_time = klines[-1][0]
 
-            info["end_time"] = oldest_open_time - 1
-            info["processed"] += len(klines)
-
             log(
                 f"[DB] UPSERT DONE {symbol} "
-                f"UTC_RANGE={ms_to_utc(oldest_open_time)} → {ms_to_utc(newest_open_time)} "
-                f"total_processed={info['processed']}"
+                f"{ms_to_utc(oldest_open_time)} → {ms_to_utc(newest_open_time)}"
             )
 
-            # ⭐ PROGRESS LOG
-            percent = (info["processed"] / total_count) * 100
-            log(f"[PROGRESS] {symbol} {percent:.1f}% complete")
+            # move cursor backward
+            info["cursor_end"] = oldest_open_time - 1
 
-            if len(klines) < LIMIT:
-                log(f"[COMPLETE] Reached oldest history for {symbol}")
+            # stop condition
+            if oldest_open_time <= start_ts:
+                log(f"[STOP] {symbol} reached start boundary")
                 info["done"] = True
 
             time.sleep(0.12)
 
         if all(v["done"] for v in state.values()):
             log("[FINISH] All symbols completed")
-
-            # ⭐ FINAL SUMMARY
-            log("--------------------------------------------------")
-            log("[SUMMARY]")
-            for s, v in state.items():
-                log(f"{s} processed={v['processed']} done={v['done']}")
-            log("--------------------------------------------------")
-
             break
 
 
@@ -224,4 +199,14 @@ def backfill_all_symbols(tf, total_count):
 # Entry
 # --------------------------------------------------
 if __name__ == "__main__":
-    backfill_all_symbols("1d", 365)
+
+    # ✅ Default → last 1 year
+    backfill_all_symbols("1d")
+
+    # ✅ Custom range example:
+    # from datetime import datetime
+    # backfill_all_symbols(
+    #     "1d",
+    #     start_date=datetime(2024,10,1),
+    #     end_date=datetime(2025,10,1),
+    # )
