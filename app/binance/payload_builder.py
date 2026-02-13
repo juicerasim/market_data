@@ -1,3 +1,4 @@
+from app.binance.scripts.helpers import open_time_ms_to_ist
 def build_payloads(symbol, interval, klines):
     rows = []
 
@@ -7,6 +8,7 @@ def build_payloads(symbol, interval, klines):
             "interval": interval,
             "event_time": None,      # REST backfill
             "open_time": k[0],
+            "lk_at": open_time_ms_to_ist(k[0]),
             "close_time": k[6],
 
             "first_trade_id": None,

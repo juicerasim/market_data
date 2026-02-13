@@ -1,6 +1,7 @@
 from sqlalchemy.dialects.postgresql import insert
 from app.models import Candle1M, Candle15M, Candle1H, Candle4H, Candle1D
 from app.db import SessionLocal
+from time import sleep
 MODEL_MAP = {
     "1m": Candle1M,
     "15m": Candle15M,
@@ -17,6 +18,7 @@ def insert_candles_batch(tf, payloads):
 
     try:
         stmt = insert(Model).values(payloads)
+        # sleep(10)  # to mitigate rare "could not serialize access" errors
 
         stmt = stmt.on_conflict_do_update(
             index_elements=["symbol", "open_time"],

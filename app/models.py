@@ -2,6 +2,7 @@ from sqlalchemy import (
     Column, BigInteger, Integer, String, Float, Boolean,
     Index, UniqueConstraint, DateTime, Identity
 )
+import sqlalchemy as sa
 from app.base import Base
 
 
@@ -104,6 +105,11 @@ class CandleBase:
     Identity(always=True),   # ⭐ THIS enables auto increment
     unique=True,
     index=True
+)
+
+    lk_at = sa.Column(
+    sa.DateTime(timezone=True),
+    nullable=True
 )
     event_time = Column(BigInteger, nullable=True)
     interval = Column(String(20), nullable=True)
