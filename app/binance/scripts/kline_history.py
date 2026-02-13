@@ -201,7 +201,8 @@ def backfill_all_symbols(tf, start_date=None, end_date=None):
 if __name__ == "__main__":
 
     # ✅ Default → last 1 year
-    backfill_all_symbols("1d")
+    # backfill_all_symbols("1d")
+    backfill_all_symbols("4h")
 
     # ✅ Custom range example:
     # from datetime import datetime

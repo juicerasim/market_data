@@ -2,9 +2,10 @@ from sqlalchemy.dialects.postgresql import insert
 from app.models import Candle1M, Candle15M, Candle1H, Candle4H, Candle1D
 from app.db import SessionLocal
 MODEL_MAP = {
-    # "15m": Candle15M,
-    # "1h": Candle1H,
-    # "4h": Candle4H,
+    "1m": Candle1M,
+    "15m": Candle15M,
+    "1h": Candle1H,
+    "4h": Candle4H,
     "1d": Candle1D,
 }
 def insert_candles_batch(tf, payloads):
