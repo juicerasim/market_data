@@ -1,5 +1,6 @@
 from queue import Full
 from app.binance.ws.queue import candle_queue, QUEUE_MAXSIZE
+from app.binance.scripts.helpers import open_time_ms_to_ist
 
 
 def handle(k, event_time):
@@ -10,6 +11,7 @@ def handle(k, event_time):
         "event_time": event_time,
         "symbol": k["s"],
         "open_time": k["t"],
+        "lk_at": open_time_ms_to_ist(k["t"]),
         "interval": k["i"],
         "close_time": k["T"],
         "first_trade_id": k["f"],

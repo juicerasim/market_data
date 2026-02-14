@@ -111,10 +111,10 @@ def fetch_klines(symbol, tf, start_time=None, end_time=None):
         "limit": LIMIT,
     }
 
-    if start_time:
+    if start_time is not None:
         params["startTime"] = start_time
 
-    if end_time:
+    if end_time is not None:
         params["endTime"] = end_time
 
     log(

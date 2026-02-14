@@ -17,7 +17,7 @@ def insert_candle(tf, payload):
         return
 
     db = SessionLocal()
-
+    print(f"[DB] Inserting candle → {payload['symbol']} {tf} {payload['open_time']}")
     try:
         stmt = insert(Model).values(**payload)
 
