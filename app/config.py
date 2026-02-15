@@ -21,5 +21,12 @@ class Settings:
             RuntimeWarning
         )
 
-
 settings = Settings()
+
+TIMEFRAMES = {
+"1m": {"table": "candles_1m", "tf_ms": 60_000},
+"15m": {"table": "candles_15m", "tf_ms": 15 * 60_000},
+"1h": {"table": "candles_1h", "tf_ms": 60 * 60_000},
+"4h": {"table": "candles_4h", "tf_ms": 4 * 60 * 60_000},
+"1d": {"table": "candles_1d", "tf_ms": 24 * 60 * 60_000},
+}

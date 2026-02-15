@@ -3,8 +3,11 @@
 .env.local
 .env.*.local
 .vscode/
-app/__pycache__/
+*./__pycache__/
 *.pyc
+*.jsonl
+*.pyc
+
 
 # ⚠️ SECURITY: Never commit credentials!
 # Store all sensitive data in environment variables or secure secrets manager
