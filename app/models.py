@@ -155,6 +155,13 @@ class Candle1M(CandleBase, Base):
     symbol = Column(String(20), primary_key=True)
     open_time = Column(BigInteger, primary_key=True)
 
+class Candle2M(CandleBase, Base):
+    __tablename__ = "candles_2m"
+
+    # ⭐ Composite Primary Key
+    symbol = Column(String(20), primary_key=True)
+    open_time = Column(BigInteger, primary_key=True)
+
 
 # -------------------------------------------------
 # 15 Minute Candle

@@ -98,6 +98,9 @@ def run_gap_watchdog():
                 continue
 
             for tf, config in TIMEFRAMES.items():
+                if tf == "2m":
+                    log("[WATCHDOG] Skipping derived TF", tf=tf)
+                    continue
 
                 table = config["table"]
                 tf_ms = config["tf_ms"]

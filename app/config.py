@@ -8,9 +8,9 @@ load_dotenv()
 
 class Settings:
     # ⚠️ SECURITY: These should come from environment variables, not defaults
-    key = os.getenv("API_KEY", "")
-    secret = os.getenv("API_SECRET", "")
-    socketEndpoint = os.getenv("SOCKET_ENDPOINT", "")
+    key = os.getenv("API_KEY")
+    secret = os.getenv("API_SECRET")
+    socketEndpoint = os.getenv("SOCKET_ENDPOINT")
 
     # Validate that required secrets are present
     if not key or not secret:
@@ -25,6 +25,7 @@ settings = Settings()
 
 TIMEFRAMES = {
 "1m": {"table": "candles_1m", "tf_ms": 60_000},
+"2m": {"table": "candles_2m", "tf_ms": 2 * 60_000},
 "15m": {"table": "candles_15m", "tf_ms": 15 * 60_000},
 "1h": {"table": "candles_1h", "tf_ms": 60 * 60_000},
 "4h": {"table": "candles_4h", "tf_ms": 4 * 60 * 60_000},
