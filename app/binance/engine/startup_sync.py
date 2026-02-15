@@ -53,6 +53,7 @@ def run_startup_sync():
 
             if last_open and last_open < expected_last_1m:
                 print(f"[1m GAP] {symbol}")
+
                 backfill_symbol(
                     symbol,
                     "1m",
@@ -65,11 +66,16 @@ def run_startup_sync():
         print("[SYNC] 1m sync completed.")
 
         # -------------------------------------------------
-        # STEP 3 — Fix Higher TFs using SAME symbols
+        # STEP 3 — Fix Higher TFs
         # -------------------------------------------------
         for tf, config in TIMEFRAMES.items():
 
             if tf == "1m":
+                continue
+
+            # 🔥 SKIP DERIVED TF (like 2m)
+            if not config.get("api", False):
+                print(f"[SYNC] Skipping derived TF={tf}")
                 continue
 
             table = config["table"]
@@ -87,9 +93,9 @@ def run_startup_sync():
                     WHERE symbol = :symbol
                 """), {"symbol": symbol}).scalar()
 
-                # Table empty for this symbol
                 if not last_open:
                     print(f"[INIT BACKFILL] {symbol} | TF={tf}")
+
                     backfill_symbol(
                         symbol,
                         tf,
@@ -99,9 +105,9 @@ def run_startup_sync():
                         expected_last,
                     )
 
-                # Partial gap
                 elif last_open < expected_last:
                     print(f"[GAP BACKFILL] {symbol} | TF={tf}")
+
                     backfill_symbol(
                         symbol,
                         tf,

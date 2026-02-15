@@ -1,9 +1,10 @@
 from sqlalchemy.dialects.postgresql import insert
 from app.db import SessionLocal
-from app.models import Candle1M, Candle15M, Candle1H, Candle4H, Candle1D
+from app.models import Candle1M, Candle2M, Candle15M, Candle1H, Candle4H, Candle1D
 
 MODEL_MAP = {
     "1m": Candle1M,
+    "2m": Candle2M,
     "15m": Candle15M,
     "1h": Candle1H,
     "4h": Candle4H,
@@ -15,6 +16,9 @@ def insert_candle(tf, payload):
     Model = MODEL_MAP.get(tf)
     if not Model:
         return
+    print("===========payload=============")
+    print(payload)
+    print("=============payload===========")
 
     db = SessionLocal()
     print(f"[DB] Inserting candle → {payload['symbol']} {tf} {payload['open_time']}")

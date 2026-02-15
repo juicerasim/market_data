@@ -1,6 +1,7 @@
 import signal
 from queue import Empty
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from app.binance.ws.queue import candle_queue
 from app.binance.repo import insert_candle
@@ -8,11 +9,16 @@ from app.config import TIMEFRAMES
 
 RUNNING = True
 
+
 # --------------------------------------------------
-# HTF Aggregation State
+# Aggregation State (IN-MEMORY ONLY)
+# --------------------------------------------------
 # Structure:
 # {
 #   "15m": {
+#       "BTCUSDT": current_bucket_payload
+#   },
+#   "1h": {
 #       "BTCUSDT": current_bucket_payload
 #   }
 # }
@@ -30,49 +36,87 @@ signal.signal(signal.SIGINT, shutdown_handler)
 signal.signal(signal.SIGTERM, shutdown_handler)
 
 
+def ms_to_utc(ms):
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
 # --------------------------------------------------
-# HTF Aggregation Logic (Derived From 1m)
+# HTF Aggregation Logic (Derived FROM 1m ONLY)
 # --------------------------------------------------
 def process_htf(symbol, base_payload):
     """
-    Aggregate closed 1m candle into higher timeframes.
+    Aggregate CLOSED 1m candle into higher timeframes.
     """
 
     open_time = base_payload["open_time"]
 
+    print(
+        f"\n[AGG INPUT] symbol={symbol} "
+        f"1m_open_ms={open_time} "
+        f"utc={ms_to_utc(open_time)}"
+    )
+
     for tf, config in TIMEFRAMES.items():
 
-        # Skip 1m (source-of-truth)
         if tf == "1m":
             continue
 
         tf_ms = config["tf_ms"]
 
+        # ------------------------------------------
         # Compute bucket start time
+        # ------------------------------------------
         bucket_open = (open_time // tf_ms) * tf_ms
+
+        print(
+            f"[AGG CALC] symbol={symbol} "
+            f"tf={tf} "
+            f"tf_ms={tf_ms} "
+            f"bucket_ms={bucket_open} "
+            f"bucket_utc={ms_to_utc(bucket_open)}"
+        )
 
         state = aggregation_state[tf].get(symbol)
 
-        # --------------------------------------------------
-        # If bucket changed → finalize previous bucket
-        # --------------------------------------------------
+        # ------------------------------------------
+        # NEW BUCKET → finalize previous
+        # ------------------------------------------
         if not state or state["open_time"] != bucket_open:
 
             if state:
-                print(f"[AGG] Finalizing {symbol} {tf}")
+                print(
+                    f"[AGG FINALIZE] symbol={symbol} "
+                    f"tf={tf} "
+                    f"final_bucket={ms_to_utc(state['open_time'])}"
+                )
+
                 insert_candle(tf, state)
 
-            # Start new bucket
+            print(
+                f"[AGG NEW BUCKET] symbol={symbol} "
+                f"tf={tf} "
+                f"bucket={ms_to_utc(bucket_open)}"
+            )
+
             aggregation_state[tf][symbol] = {
                 **base_payload,
                 "open_time": bucket_open,
+                "interval": tf,  # CRITICAL FIX
             }
 
             continue
 
-        # --------------------------------------------------
-        # Update existing bucket
-        # --------------------------------------------------
+        # ------------------------------------------
+        # UPDATE EXISTING BUCKET
+        # ------------------------------------------
+        print(
+            f"[AGG UPDATE] symbol={symbol} "
+            f"tf={tf} "
+            f"bucket={ms_to_utc(bucket_open)}"
+        )
+
         state["high_price"] = max(
             state["high_price"], base_payload["high_price"]
         )
@@ -97,16 +141,22 @@ def run():
         try:
             tf, payload = candle_queue.get(timeout=1)
 
-            print(f"[DB] Inserting candle → {payload['symbol']} {tf}")
+            print(
+                f"\n[DB INSERT] symbol={payload['symbol']} "
+                f"tf={tf} "
+                f"open_ms={payload['open_time']} "
+                f"utc={ms_to_utc(payload['open_time'])} "
+                f"interval={payload.get('interval')}"
+            )
 
-            # --------------------------------------------------
-            # Always insert original candle
-            # --------------------------------------------------
+            # ------------------------------------------
+            # Insert original candle
+            # ------------------------------------------
             insert_candle(tf, payload)
 
-            # --------------------------------------------------
-            # Only aggregate from 1m
-            # --------------------------------------------------
+            # ------------------------------------------
+            # Aggregate ONLY from 1m
+            # ------------------------------------------
             if tf == "1m":
                 process_htf(payload["symbol"], payload)
 
@@ -114,6 +164,6 @@ def run():
             continue
 
         except Exception as e:
-            print("[DB] ERROR:", e)
+            print("[DB ERROR]:", e)
 
     print("[DB] Worker stopped")

@@ -3,15 +3,11 @@ from datetime import datetime, timezone
 
 from sqlalchemy import text
 from app.db import SessionLocal
-
+from app.config import TIMEFRAMES
+from app.binance.engine.time_utils import get_exchange_time_ms, floor_time
 from app.binance.scripts.kline_history import fetch_klines, log
 from app.binance.scripts.insert import insert_candles_batch
 from app.binance.payload_builder import build_payloads
-from .time_utils import get_exchange_time_ms, floor_time
-from app.config import TIMEFRAMES
-
-
-
 
 
 def ms_to_utc(ms):
@@ -84,9 +80,6 @@ def run_gap_watchdog():
         db = SessionLocal()
 
         try:
-            # -------------------------------------------------
-            # SOURCE OF TRUTH → 1m table ONLY
-            # -------------------------------------------------
             rows = db.execute(text("""
                 SELECT DISTINCT symbol FROM candles_1m
             """)).fetchall()
@@ -98,7 +91,9 @@ def run_gap_watchdog():
                 continue
 
             for tf, config in TIMEFRAMES.items():
-                if tf == "2m":
+
+                # 🔥 SKIP DERIVED TF (like 2m)
+                if not config.get("api", False):
                     log("[WATCHDOG] Skipping derived TF", tf=tf)
                     continue
 
@@ -110,12 +105,7 @@ def run_gap_watchdog():
 
                 log("[CHECK TF]", tf=tf, expected=ms_to_utc(expected_last))
 
-                checked_count = 0
-                gap_count = 0
-
                 for symbol in symbols:
-
-                    checked_count += 1
 
                     last_open = db.execute(text(f"""
                         SELECT MAX(open_time)
@@ -127,8 +117,6 @@ def run_gap_watchdog():
                         continue
 
                     if last_open < expected_last:
-
-                        gap_count += 1
 
                         log(
                             "[WATCHDOG GAP DETECTED]",
@@ -149,21 +137,6 @@ def run_gap_watchdog():
                             gap_start,
                             gap_end,
                         )
-
-                if gap_count == 0:
-                    log(
-                        "[WATCHDOG OK]",
-                        tf=tf,
-                        checked=checked_count,
-                        message="All symbols up-to-date",
-                    )
-                else:
-                    log(
-                        "[WATCHDOG SUMMARY]",
-                        tf=tf,
-                        checked=checked_count,
-                        gaps=gap_count,
-                    )
 
         finally:
             db.close()
