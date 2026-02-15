@@ -84,21 +84,28 @@ def run_gap_watchdog():
         db = SessionLocal()
 
         try:
+            # -------------------------------------------------
+            # SOURCE OF TRUTH → 1m table ONLY
+            # -------------------------------------------------
+            rows = db.execute(text("""
+                SELECT DISTINCT symbol FROM candles_1m
+            """)).fetchall()
+
+            symbols = [r[0] for r in rows]
+
+            if not symbols:
+                log("[WATCHDOG] No symbols in 1m table. Waiting...")
+                continue
+
             for tf, config in TIMEFRAMES.items():
 
                 table = config["table"]
                 tf_ms = config["tf_ms"]
 
-                grace_ms = tf_ms  # avoid checking current forming candle
+                grace_ms = tf_ms
                 expected_last = floor_time(exchange_now - grace_ms, tf_ms) - tf_ms
 
                 log("[CHECK TF]", tf=tf, expected=ms_to_utc(expected_last))
-
-                rows = db.execute(text(f"""
-                    SELECT DISTINCT symbol FROM {table}
-                """)).fetchall()
-
-                symbols = [r[0] for r in rows]
 
                 checked_count = 0
                 gap_count = 0
@@ -140,7 +147,6 @@ def run_gap_watchdog():
                             gap_end,
                         )
 
-                # 👇 Explicit health log
                 if gap_count == 0:
                     log(
                         "[WATCHDOG OK]",
