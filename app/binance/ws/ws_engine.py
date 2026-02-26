@@ -45,7 +45,7 @@ def get_symbols():
 
     coins = json.loads(data)
     logger.info("Loaded symbols from Redis: %d", len(coins))
-    return coins[:2]
+    return coins
 
 
 def subscribe(ws, symbols):

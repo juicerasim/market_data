@@ -23,22 +23,13 @@ class Settings:
 
 settings = Settings()
 
-# TIMEFRAMES = {
-# "1m": {"table": "candles_1m", "tf_ms": 60_000},
-# "2m": {"table": "candles_2m", "tf_ms": 2 * 60_000},
-# "15m": {"table": "candles_15m", "tf_ms": 15 * 60_000},
-# "1h": {"table": "candles_1h", "tf_ms": 60 * 60_000},
-# "4h": {"table": "candles_4h", "tf_ms": 4 * 60 * 60_000},
-# "1d": {"table": "candles_1d", "tf_ms": 24 * 60 * 60_000},
-# }
-
 TIMEFRAMES = {
     "1m":  {"tf_ms": 60_000,        "table": "candles_1m",  "api": True},
-    "2m":  {"tf_ms": 120_000,       "table": "candles_2m",  "api": False},  # derived
+    # "2m":  {"tf_ms": 120_000,       "table": "candles_2m",  "api": False},  # derived
     "15m": {"tf_ms": 900_000,       "table": "candles_15m", "api": True},
     "1h":  {"tf_ms": 3_600_000,     "table": "candles_1h",  "api": True},
-    "4h":  {"tf_ms": 14_400_000,    "table": "candles_4h",  "api": True},
-    "1d":  {"tf_ms": 86_400_000,    "table": "candles_1d",  "api": True},
+    # "4h":  {"tf_ms": 14_400_000,    "table": "candles_4h",  "api": True},
+    # "1d":  {"tf_ms": 86_400_000,    "table": "candles_1d",  "api": True},
 }
 
 

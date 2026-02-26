@@ -101,18 +101,15 @@ def get_symbols():
 
 
 # --------------------------------------------------
-# Fetch klines
+# Fetch klines (ONLY endTime used for pagination)
 # --------------------------------------------------
-def fetch_klines(symbol, tf, start_time=None, end_time=None):
+def fetch_klines(symbol, tf, end_time=None):
 
     params = {
         "symbol": symbol,
         "interval": tf,
         "limit": LIMIT,
     }
-
-    if start_time is not None:
-        params["startTime"] = start_time
 
     if end_time is not None:
         params["endTime"] = end_time
@@ -121,7 +118,6 @@ def fetch_klines(symbol, tf, start_time=None, end_time=None):
         "[API] Request",
         symbol=symbol,
         tf=tf,
-        start=start_time,
         end=end_time,
     )
 
@@ -146,22 +142,21 @@ def fetch_klines(symbol, tf, start_time=None, end_time=None):
 
 
 # --------------------------------------------------
-# ROUND ROBIN BACKFILL / SYNC ENGINE
+# BACKFILL ENGINE (Proper Backward Pagination)
 # --------------------------------------------------
 def backfill_all_symbols(tf, start_date=None, end_date=None):
 
     now_utc = datetime.now(timezone.utc)
 
-    # Resolve Date Range
     if start_date is None and end_date is None:
         end_date = now_utc
-        start_date = now_utc - timedelta(days=365)
+        start_date = now_utc - timedelta(days=60)
 
     elif start_date is not None and end_date is None:
         end_date = now_utc
 
     elif start_date is None and end_date is not None:
-        start_date = end_date - timedelta(days=365)
+        start_date = end_date - timedelta(days=60)
 
     if start_date.tzinfo is None:
         start_date = start_date.replace(tzinfo=timezone.utc)
@@ -183,14 +178,11 @@ def backfill_all_symbols(tf, start_date=None, end_date=None):
     log("[START]", tf=tf, limit=LIMIT)
     log("[START] Date Range", start=str(start_date), end=str(end_date))
 
-    # --------------------------------------------------
-    # STATE with FETCH COUNTER
-    # --------------------------------------------------
     state = {
         symbol: {
             "cursor_end": end_ts,
             "done": False,
-            "fetched": 0,   # 👈 total candles fetched from API
+            "fetched": 0,
         }
         for symbol in symbols
     }
@@ -220,7 +212,6 @@ def backfill_all_symbols(tf, start_date=None, end_date=None):
             klines = fetch_klines(
                 symbol,
                 tf,
-                start_time=start_ts,
                 end_time=info["cursor_end"],
             )
 
@@ -229,10 +220,20 @@ def backfill_all_symbols(tf, start_date=None, end_date=None):
                 info["done"] = True
                 continue
 
-            # 👇 COUNT FETCHED RECORDS
-            info["fetched"] += len(klines)
+            # FILTER OUT CANDLES OLDER THAN START
+            filtered = [
+                k for k in klines
+                if k[0] >= start_ts
+            ]
 
-            payloads = build_payloads(symbol, tf, klines)
+            if not filtered:
+                log("[STOP] reached start boundary", symbol=symbol)
+                info["done"] = True
+                continue
+
+            info["fetched"] += len(filtered)
+
+            payloads = build_payloads(symbol, tf, filtered)
 
             log(
                 "[DB] UPSERT START",
@@ -256,16 +257,13 @@ def backfill_all_symbols(tf, start_date=None, end_date=None):
             # move cursor backward
             info["cursor_end"] = oldest_open_time - 1
 
-            # stop condition
+            # If this batch already contains start boundary → stop
             if oldest_open_time <= start_ts:
-                log("[STOP] reached start boundary", symbol=symbol)
+                log("[STOP] boundary reached", symbol=symbol)
                 info["done"] = True
 
             time.sleep(0.12)
 
-        # --------------------------------------------------
-        # FINAL SUMMARY
-        # --------------------------------------------------
         if all(v["done"] for v in state.values()):
             log("[FINISH] All symbols completed")
 
@@ -284,4 +282,6 @@ def backfill_all_symbols(tf, start_date=None, end_date=None):
 # Entry
 # --------------------------------------------------
 if __name__ == "__main__":
-    backfill_all_symbols("4h")
+    backfill_all_symbols("1h")
+    # backfill_all_symbols("15m")
+    # backfill_all_symbols("1d")
