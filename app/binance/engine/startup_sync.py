@@ -3,13 +3,14 @@ from app.db import SessionLocal
 from app.config import TIMEFRAMES
 from app.binance.engine.time_utils import get_exchange_time_ms, floor_time
 from app.binance.engine.gap_watchdog import backfill_symbol
+from app.logging_config import get_logger
+
+logger = get_logger("market_data.binance.startup_sync")
 
 
 def run_startup_sync():
 
-    print("\n=================================================")
-    print("[BOOT PHASE 1] STARTUP BACKFILL ENGINE STARTED")
-    print("=================================================\n")
+    logger.info("STARTUP BACKFILL ENGINE STARTED")
 
     exchange_now = get_exchange_time_ms()
     db = SessionLocal()
@@ -25,12 +26,10 @@ def run_startup_sync():
         symbols = [r[0] for r in rows]
 
         if not symbols:
-            print("[SYNC] No symbols found in 1m table.")
-            print("[SYNC] Skipping startup backfill.")
-            print("=================================================\n")
+            logger.info("No symbols found in 1m table. Skipping startup backfill.")
             return
 
-        print(f"[SYNC] Source symbols from 1m: {len(symbols)}")
+        logger.info("Source symbols from 1m: %d", len(symbols))
 
         # -------------------------------------------------
         # STEP 2 — Fix 1m first
@@ -41,7 +40,7 @@ def run_startup_sync():
 
         expected_last_1m = floor_time(exchange_now, tf_ms_1m) - tf_ms_1m
 
-        print("\n[SYNC] Checking 1m gaps")
+        logger.info("Checking 1m gaps")
 
         for symbol in symbols:
 
@@ -52,7 +51,7 @@ def run_startup_sync():
             """), {"symbol": symbol}).scalar()
 
             if last_open and last_open < expected_last_1m:
-                print(f"[1m GAP] {symbol}")
+                logger.warning("1m GAP detected %s", symbol)
 
                 backfill_symbol(
                     symbol,
@@ -63,7 +62,7 @@ def run_startup_sync():
                     expected_last_1m,
                 )
 
-        print("[SYNC] 1m sync completed.")
+        logger.info("1m sync completed")
 
         # -------------------------------------------------
         # STEP 3 — Fix Higher TFs
@@ -75,7 +74,7 @@ def run_startup_sync():
 
             # 🔥 SKIP DERIVED TF (like 2m)
             if not config.get("api", False):
-                print(f"[SYNC] Skipping derived TF={tf}")
+                logger.debug("Skipping derived TF=%s", tf)
                 continue
 
             table = config["table"]
@@ -83,7 +82,7 @@ def run_startup_sync():
 
             expected_last = floor_time(exchange_now, tf_ms) - tf_ms
 
-            print(f"\n[SYNC] Checking TF={tf}")
+            logger.info("Checking TF=%s", tf)
 
             for symbol in symbols:
 
@@ -94,7 +93,7 @@ def run_startup_sync():
                 """), {"symbol": symbol}).scalar()
 
                 if not last_open:
-                    print(f"[INIT BACKFILL] {symbol} | TF={tf}")
+                    logger.info("INIT BACKFILL %s TF=%s", symbol, tf)
 
                     backfill_symbol(
                         symbol,
@@ -106,7 +105,7 @@ def run_startup_sync():
                     )
 
                 elif last_open < expected_last:
-                    print(f"[GAP BACKFILL] {symbol} | TF={tf}")
+                    logger.warning("GAP BACKFILL %s TF=%s", symbol, tf)
 
                     backfill_symbol(
                         symbol,
@@ -117,9 +116,7 @@ def run_startup_sync():
                         expected_last,
                     )
 
-        print("\n=================================================")
-        print("[BOOT PHASE 1 COMPLETED SUCCESSFULLY]")
-        print("=================================================\n")
+        logger.info("BOOT PHASE 1 COMPLETED SUCCESSFULLY")
 
     finally:
         db.close()

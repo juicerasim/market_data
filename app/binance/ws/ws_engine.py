@@ -4,6 +4,7 @@ import time
 import threading
 import signal
 
+from app.logging_config import get_logger, setup_logging
 from app.redis_client import redis_client
 from app.binance.ws.handlers import kline_handler
 from app.binance.ws.db_worker import run as db_run
@@ -20,11 +21,13 @@ current_symbols_set = set()
 # INTERVALS = ["1m", "15m", "1h", "4h", "1d"]
 INTERVALS = ["1m"]
 request_id = 1
+setup_logging()
+logger = get_logger("market_data.binance.ws")
 
 
 def shutdown_handler(sig, frame):
     global RUNNING, ws_app
-    print("[WS] Shutdown signal received")
+    logger.info("Shutdown signal received", extra={"signal": sig})
     RUNNING = False
     if ws_app:
         ws_app.close()
@@ -37,11 +40,11 @@ signal.signal(signal.SIGTERM, shutdown_handler)
 def get_symbols():
     data = redis_client.get(REDIS_KEY)
     if not data:
-        print("[WS] Redis has no symbols yet")
+        logger.debug("Redis has no symbols yet")
         return []
 
     coins = json.loads(data)
-    print(f"[WS] Loaded {len(coins)} symbols from Redis")
+    logger.info("Loaded symbols from Redis: %d", len(coins))
     return coins[:2]
 
 
@@ -49,12 +52,12 @@ def subscribe(ws, symbols):
     global request_id
 
     if not symbols:
-        print("[WS] No symbols to subscribe")
+        logger.debug("No symbols to subscribe")
         return
 
     params = [f"{s.lower()}@kline_{tf}" for s in symbols for tf in INTERVALS]
 
-    print(f"[WS] SUBSCRIBE → {len(params)} streams")
+    logger.info("SUBSCRIBE → %d streams", len(params))
 
     ws.send(json.dumps({
         "method": "SUBSCRIBE",
@@ -70,7 +73,7 @@ def unsubscribe(ws, symbols):
 
     params = [f"{s.lower()}@kline_{tf}" for s in symbols for tf in INTERVALS]
 
-    print(f"[WS] UNSUBSCRIBE → {len(params)} streams")
+    logger.info("UNSUBSCRIBE → %d streams", len(params))
 
     ws.send(json.dumps({
         "method": "UNSUBSCRIBE",
@@ -85,7 +88,7 @@ def on_message(ws, message):
     try:
         msg = json.loads(message)
     except Exception:
-        print("[WS] Invalid JSON received")
+        logger.warning("Invalid JSON received")
         return
 
     if "result" in msg:
@@ -95,14 +98,14 @@ def on_message(ws, message):
     if "e" not in msg:
         return
 
-    # print("[WS] Candle event received")
+    # candle event received
     kline_handler.handle(msg)
 
 
 def on_open(ws):
     global current_symbols_list, current_symbols_set
 
-    print("[WS] Connected to Binance")
+    logger.info("Connected to Binance")
 
     current_symbols_list = get_symbols()
     current_symbols_set = set(current_symbols_list)
@@ -111,13 +114,12 @@ def on_open(ws):
 
 
 def on_close(ws, a, b):
-    print("[WS] Connection closed")
+    logger.info("Connection closed: %s %s", a, b)
 
 
 def watch_symbols():
     global current_symbols_list, current_symbols_set
-
-    print("[WS] Symbol watcher started")
+    logger.info("Symbol watcher started")
 
     while RUNNING:
         time.sleep(15)
@@ -129,11 +131,11 @@ def watch_symbols():
         to_remove = current_symbols_set - new_set
 
         if to_add:
-            print(f"[WS] Adding {len(to_add)} symbols")
+            logger.info("Adding %d symbols", len(to_add))
             subscribe(ws_app, list(to_add))
 
         if to_remove:
-            print(f"[WS] Removing {len(to_remove)} symbols")
+            logger.info("Removing %d symbols", len(to_remove))
             unsubscribe(ws_app, list(to_remove))
 
         current_symbols_list = new_list
@@ -143,15 +145,15 @@ def watch_symbols():
 def run():
     global ws_app
 
-    print("[WS] Starting DB worker thread")
+    logger.info("Starting DB worker thread")
     threading.Thread(target=db_run, daemon=True).start()
 
-    print("[WS] Starting symbol watcher thread")
+    logger.info("Starting symbol watcher thread")
     threading.Thread(target=watch_symbols, daemon=True).start()
 
     while RUNNING:
         try:
-            print(f"[WS] Connecting → {BASE_URL}")
+            logger.info("Connecting → %s", BASE_URL)
 
             ws_app = websocket.WebSocketApp(
                 BASE_URL,
@@ -162,13 +164,13 @@ def run():
 
             ws_app.run_forever(ping_interval=20, ping_timeout=10)
 
-        except Exception as e:
-            print("[WS] Connection error:", e)
+        except Exception:
+            logger.exception("Connection error; retrying in 5s")
             time.sleep(5)
 
-    print("[WS] Engine stopped")
+    logger.info("Engine stopped")
 
 
 if __name__ == "__main__":
-    print("[WS] WS Engine booting...")
+    logger.info("WS Engine booting...")
     run()

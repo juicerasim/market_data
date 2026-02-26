@@ -1,6 +1,7 @@
 from sqlalchemy.dialects.postgresql import insert
 from app.db import SessionLocal
 from app.models import Candle1M, Candle2M, Candle15M, Candle1H, Candle4H, Candle1D
+from app.logging_config import get_logger
 
 MODEL_MAP = {
     "1m": Candle1M,
@@ -16,12 +17,11 @@ def insert_candle(tf, payload):
     Model = MODEL_MAP.get(tf)
     if not Model:
         return
-    print("===========payload=============")
-    print(payload)
-    print("=============payload===========")
+    logger = get_logger("market_data.binance.repo")
+    logger.debug("payload", extra={"payload": payload})
 
     db = SessionLocal()
-    print(f"[DB] Inserting candle → {payload['symbol']} {tf} {payload['open_time']}")
+    logger.info("Inserting candle %s %s %s", payload.get("symbol"), tf, payload.get("open_time"))
     try:
         stmt = insert(Model).values(**payload)
 
@@ -47,9 +47,9 @@ def insert_candle(tf, payload):
         db.execute(stmt)
         db.commit()
 
-    except Exception as e:
+    except Exception:
         db.rollback()
-        print("[DB] UPSERT ERROR:", e)
+        logger.exception("UPSERT ERROR for payload", extra={"payload": payload})
 
     finally:
         db.close()

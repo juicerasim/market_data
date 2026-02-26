@@ -4,6 +4,7 @@ import signal
 import time
 import threading
 
+from app.logging_config import setup_logging, get_logger, install_exception_hook
 from app.binance.engine.startup_sync import run_startup_sync
 from app.binance.engine.gap_watchdog import run_gap_watchdog
 
@@ -23,7 +24,8 @@ RUNNING = True
 # Start subprocess worker
 # ------------------------------------------------------
 def start_worker(module: str):
-    print(f"[MAIN] Starting worker → {module}")
+    logger = get_logger("market_data.main")
+    logger.info("Starting worker %s", module)
     return subprocess.Popen([sys.executable, "-m", module])
 
 
@@ -32,7 +34,8 @@ def start_worker(module: str):
 # ------------------------------------------------------
 def shutdown_handler(sig, frame):
     global RUNNING
-    print("\n[MAIN] Shutdown signal received")
+    logger = get_logger("market_data.main")
+    logger.info("Shutdown signal received: %s", sig)
     RUNNING = False
 
     for p in processes:
@@ -47,7 +50,7 @@ def shutdown_handler(sig, frame):
         except Exception:
             pass
 
-    print("[MAIN] All workers stopped")
+    logger.info("All workers stopped")
     sys.exit(0)
 
 
@@ -61,23 +64,26 @@ signal.signal(signal.SIGTERM, shutdown_handler)
 def main():
     global processes
 
-    print("[MAIN] Booting market-data pipeline")
+    setup_logging()
+    install_exception_hook()
+    logger = get_logger("market_data.main")
+
+    logger.info("Booting market-data pipeline")
 
     # ---------------------------------------------
     # PHASE 1 — STARTUP SYNC
     
     try:
-        print("[MAIN] Running startup sync...")
+        logger.info("Running startup sync...")
         run_startup_sync()
-        print("[MAIN] Startup sync completed\n")
-    except Exception as e:
-        print("[MAIN] Startup sync failed:", e)
-        print("[MAIN] Continuing with live mode...\n")
+        logger.info("Startup sync completed")
+    except Exception:
+        logger.exception("Startup sync failed; continuing with live mode")
 
     # ---------------------------------------------
     # PHASE 3 — GAP WATCHDOG (background thread)
     # ---------------------------------------------
-    print("[MAIN] Starting gap watchdog thread...")
+    logger.info("Starting gap watchdog thread")
     watchdog_thread = threading.Thread(
         target=run_gap_watchdog,
         daemon=True,
@@ -87,11 +93,11 @@ def main():
     # ---------------------------------------------
     # PHASE 2 — START WORKERS
     # ---------------------------------------------
-    print("[MAIN] Starting workers...\n")
+    logger.info("Starting workers")
 
     processes = [start_worker(w) for w in WORKERS]
 
-    print("\n[MAIN] All workers started successfully\n")
+    logger.info("All workers started successfully")
 
     # ---------------------------------------------
     # Keep main process alive
