@@ -1,12 +1,15 @@
-import pandas as pd
-import numpy as np
+import os
+import json
 import logging
+from datetime import datetime
+
+import pandas as pd
 from sqlalchemy import text
 from app.db import SessionLocal
 
 
 # =============================
-# LOGGING (Clean Output)
+# LOGGING
 # =============================
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -21,31 +24,24 @@ LOOKBACK = 200
 COMPRESSION_PERIOD = 20
 ATR_PERIOD = 14
 VOLUME_MULTIPLIER = 1.8
-OI_DELTA_THRESHOLD = 0.005   # 0.5%
+OI_DELTA_THRESHOLD = 0.005
 BUY_RATIO_THRESHOLD = 0.55
 FUNDING_LIMIT = 0.002
 
 
 # =============================
-# LOAD SYMBOL LIST
+# DB FUNCTIONS
 # =============================
 
 def get_symbols():
     db = SessionLocal()
     try:
-        q = text("""
-            SELECT DISTINCT symbol
-            FROM candles_1h
-        """)
+        q = text("SELECT DISTINCT symbol FROM candles_1h")
         rows = db.execute(q).fetchall()
         return [r[0] for r in rows]
     finally:
         db.close()
 
-
-# =============================
-# LOAD DATA
-# =============================
 
 def load_symbol_data(symbol: str):
     db = SessionLocal()
@@ -57,7 +53,6 @@ def load_symbol_data(symbol: str):
             ORDER BY open_time DESC
             LIMIT {LOOKBACK}
         """)
-
         df = pd.read_sql(q, db.bind, params={"symbol": symbol})
         df = df.sort_values("open_time").reset_index(drop=True)
         return df
@@ -79,19 +74,34 @@ def compute_atr(df, period=14):
     tr3 = (low - close.shift()).abs()
 
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(period).mean()
-
-    return atr
+    return tr.rolling(period).mean()
 
 
 # =============================
-# PRE-EXPLOSION DETECTION
+# EVALUATION ENGINE (PURE NUMERIC)
 # =============================
 
-def detect_pre_explosion(df):
+def evaluate_symbol(df, symbol_name):
 
+    def safe_float(value):
+        return float(value) if value is not None and pd.notna(value) else 0.0
+
+    # If insufficient data, still return numeric structure
     if len(df) < 50:
-        return None
+        return {
+            "symbol": symbol_name,
+            "range_20": 0.0,
+            "atr_x3_limit": 0.0,
+            "breakout": False,
+            "volume_ratio": 0.0,
+            "volume_threshold": VOLUME_MULTIPLIER,
+            "oi_delta": 0.0,
+            "oi_threshold": OI_DELTA_THRESHOLD,
+            "funding_rate": 0.0,
+            "funding_limit": FUNDING_LIMIT,
+            "buy_ratio": 0.0,
+            "buy_threshold": BUY_RATIO_THRESHOLD
+        }
 
     df["atr"] = compute_atr(df, ATR_PERIOD)
     df["avg_volume"] = df["base_volume"].rolling(20).mean()
@@ -100,101 +110,94 @@ def detect_pre_explosion(df):
 
     i = len(df) - 1
     current = df.iloc[i]
-    window = df.iloc[i-COMPRESSION_PERIOD:i]
+    window = df.iloc[i - COMPRESSION_PERIOD:i]
 
-    atr_now = current["atr"]
-    if pd.isna(atr_now):
-        return None
+    atr_now = safe_float(current["atr"])
+    range_20 = safe_float(window["high_price"].max() - window["low_price"].min())
+    breakout_level = safe_float(window["high_price"].max())
+    close_price = safe_float(current["close_price"])
 
-    # -----------------------------
-    # Evaluate Conditions
-    # -----------------------------
+    avg_vol = safe_float(current["avg_volume"])
+    base_volume = safe_float(current["base_volume"])
+    vol_ratio = (base_volume / avg_vol) if avg_vol > 0 else 0.0
 
-    range_20 = window["high_price"].max() - window["low_price"].min()
-    compression_ok = range_20 <= 3 * atr_now
-
-    breakout_level = window["high_price"].max()
-    breakout_ok = current["close_price"] > breakout_level
-
-    avg_vol = current["avg_volume"] if not pd.isna(current["avg_volume"]) else 0
-    vol_ratio = (current["base_volume"] / avg_vol) if avg_vol > 0 else 0
-    volume_ok = vol_ratio >= VOLUME_MULTIPLIER
-
-    oi_delta = current["oi_delta_percent"] if current["oi_delta_percent"] is not None else 0
-    avg_oi = current["avg_oi"] if not pd.isna(current["avg_oi"]) else 0
-    oi_ok = (
-        oi_delta >= OI_DELTA_THRESHOLD and
-        current["open_interest"] >= avg_oi
-    )
-
-    funding_ok = abs(current["funding_rate"]) <= FUNDING_LIMIT
-
-    buy_ratio = current["buy_ratio"] if not pd.isna(current["buy_ratio"]) else 0
-    buy_ok = buy_ratio >= BUY_RATIO_THRESHOLD
-
-    all_ok = all([
-        compression_ok,
-        breakout_ok,
-        volume_ok,
-        oi_ok,
-        funding_ok,
-        buy_ok
-    ])
-
-    status = "PASS" if all_ok else "FAIL"
-
-    # -----------------------------
-    # Clean Structured Log
-    # -----------------------------
-
-
-    logger.info(
-        f"\n{current['symbol']} | {status}\n"
-        f"  Range20   : {range_20:.4f} (<= {3*atr_now:.4f})\n"
-        f"  Breakout  : {breakout_ok}\n"
-        f"  Volume    : {vol_ratio:.2f}x (>= {VOLUME_MULTIPLIER})\n"
-        f"  OI Delta  : {oi_delta:.4f} (>= {OI_DELTA_THRESHOLD})\n"
-        f"  Funding   : {current['funding_rate']:.4f} (<= {FUNDING_LIMIT})\n"
-        f"  BuyRatio  : {buy_ratio:.2f} (>= {BUY_RATIO_THRESHOLD})\n"
-        f"{'-'*50}"
-    )
-
-    if not all_ok:
-        return None
+    oi_delta = safe_float(current["oi_delta_percent"])
+    funding_rate = safe_float(current["funding_rate"])
+    buy_ratio = safe_float(current["buy_ratio"])
 
     return {
-        "symbol": current["symbol"],
-        "open_time": current["open_time"],
-        "close_price": current["close_price"],
-        "oi_delta": oi_delta,
+        "symbol": symbol_name,
+        "range_20": range_20,
+        "atr_x3_limit": 3 * atr_now,
+        "breakout": close_price > breakout_level,
         "volume_ratio": vol_ratio,
-        "buy_ratio": buy_ratio
+        "volume_threshold": VOLUME_MULTIPLIER,
+        "oi_delta": oi_delta,
+        "oi_threshold": OI_DELTA_THRESHOLD,
+        "funding_rate": funding_rate,
+        "funding_limit": FUNDING_LIMIT,
+        "buy_ratio": buy_ratio,
+        "buy_threshold": BUY_RATIO_THRESHOLD
     }
 
 
 # =============================
-# MAIN SCANNER
+# PROMPT GENERATOR
+# =============================
+
+def generate_prompt(symbols_data):
+
+    return f"""
+You are evaluating quantitative breakout scan data.
+
+No labels are provided.
+Use only numeric values relative to their thresholds.
+
+Tasks:
+
+1. Rank strongest expansion candidates
+2. Detect near-breakout setups
+3. Identify contraction regime patterns
+4. Highlight symbols closest to threshold alignment
+5. Detect any outlier derivatives positioning
+
+Execution context:
+- Futures market
+- 1H timeframe
+
+Here is the scan data:
+
+{json.dumps(symbols_data, indent=2)}
+""".strip()
+
+
+# =============================
+# MAIN
 # =============================
 
 if __name__ == "__main__":
 
     symbols = get_symbols()
-    signals = []
-
-    logger.info(f"\nScanning {len(symbols)} symbols...\n")
+    evaluation_results = []
 
     for symbol in symbols:
         df = load_symbol_data(symbol)
-        signal = detect_pre_explosion(df)
-        if signal:
-            signals.append(signal)
+        result = evaluate_symbol(df, symbol)
+        evaluation_results.append(result)
 
-    signals = sorted(signals, key=lambda x: x["oi_delta"], reverse=True)
+    os.makedirs("signals", exist_ok=True)
 
-    logger.info("\n==============================")
-    if signals:
-        logger.info("🔥 PRE-EXPLOSION SIGNALS FOUND:")
-        for s in signals:
-            logger.info(s)
-    else:
-        logger.info("No signals detected.")
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"signals/quant_scan_{timestamp}.json"
+
+    output = {
+        "timeframe": "1H",
+        "symbols": evaluation_results,
+        "analysis_prompt": generate_prompt(evaluation_results)
+    }
+
+    with open(filename, "w") as f:
+        json.dump(output, f, indent=4)
+
+    print("\nQuantitative scan file created:")
+    print(filename)
