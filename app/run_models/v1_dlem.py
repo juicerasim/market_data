@@ -17,6 +17,8 @@ from app.db import SessionLocal
 LOOKBACK = 200
 COMPRESSION_PERIOD = 20
 ATR_PERIOD = 14
+LIQUIDITY_LOOKBACK = 48
+MIN_RR = 1.5
 
 
 # =============================
@@ -42,10 +44,6 @@ def get_symbols():
 
 
 def load_symbol_data(symbol: str):
-    """
-    Load only clean derivative data.
-    Excludes rows where OI or funding is NULL.
-    """
     db = SessionLocal()
     try:
         q = text(f"""
@@ -82,30 +80,17 @@ def compute_atr(df, period=14):
 
 
 # =============================
-# CORE EVALUATION ENGINE
+# CORE ENGINE
 # =============================
 
 def evaluate_symbol(df, symbol_name):
 
-    # ---------- HARD VALIDATION ----------
-
-    if df is None or df.empty:
-        return None
-
-    # Ensure enough clean rows remain
-    min_required = max(60, ATR_PERIOD + 10)
-    if len(df) < min_required:
-        return None
-
-    # Ensure latest candle has full derivative data
-    latest_row = df.iloc[-1]
-    if pd.isna(latest_row["open_interest"]) or pd.isna(latest_row["funding_rate"]):
+    if df is None or len(df) < max(60, ATR_PERIOD + 20):
         return None
 
     df = df.copy()
 
-    # ---------- INDICATORS ----------
-
+    # ---------- Indicators ----------
     df["atr"] = compute_atr(df, ATR_PERIOD)
     df["avg_volume"] = df["base_volume"].rolling(20).mean()
     df["ema20"] = df["close_price"].ewm(span=20).mean()
@@ -114,10 +99,8 @@ def evaluate_symbol(df, symbol_name):
     df["oi_change"] = df["open_interest"].pct_change()
     df["funding_delta"] = df["funding_rate"].diff()
 
-    # Drop any rows that became NaN after indicator calculation
     df = df.dropna().reset_index(drop=True)
-
-    if len(df) < min_required:
+    if len(df) < 60:
         return None
 
     i = len(df) - 1
@@ -125,7 +108,7 @@ def evaluate_symbol(df, symbol_name):
     window = df.iloc[i - COMPRESSION_PERIOD:i]
 
     # =============================
-    # EXPANSION
+    # EXPANSION (Compression Detection)
     # =============================
 
     range_20 = window["high_price"].max() - window["low_price"].min()
@@ -145,21 +128,28 @@ def evaluate_symbol(df, symbol_name):
     ) * 100
 
     # =============================
-    # DIRECTION
+    # OI STRUCTURE CLASSIFICATION
     # =============================
 
     price_change = current["price_change"]
     oi_change = current["oi_change"]
 
-    if pd.isna(price_change) or pd.isna(oi_change):
-        return None
-
     if price_change > 0 and oi_change > 0:
-        oi_price_relation = 1
+        oi_state = "LongBuild"
+        oi_component = 1
+    elif price_change > 0 and oi_change < 0:
+        oi_state = "ShortCover"
+        oi_component = 0.3
     elif price_change < 0 and oi_change > 0:
-        oi_price_relation = -1
+        oi_state = "ShortBuild"
+        oi_component = -0.7
     else:
-        oi_price_relation = 0
+        oi_state = "LongUnwind"
+        oi_component = -0.3
+
+    # =============================
+    # TAKER AGGRESSION
+    # =============================
 
     taker_buy = current.get("taker_buy_base_volume", 0.0)
     taker_sell = base_volume - taker_buy
@@ -171,11 +161,8 @@ def evaluate_symbol(df, symbol_name):
 
     funding_delta = current["funding_delta"]
 
-    if pd.isna(funding_delta):
-        return None
-
     directional_score = (
-        oi_price_relation * 0.4 +
+        oi_component * 0.4 +
         np.tanh(taker_ratio - 1) * 0.4 +
         np.tanh(funding_delta * 100) * 0.2
     ) * 100
@@ -187,11 +174,47 @@ def evaluate_symbol(df, symbol_name):
     ema20 = current["ema20"]
     close_price = current["close_price"]
 
-    if ema20 <= 0:
-        return None
-
     extension = (close_price - ema20) / ema20
     exhaustion_score = abs(np.tanh(extension * 5)) * 100
+
+    # =============================
+    # LIQUIDITY MAPPING
+    # =============================
+
+    recent_high = df["high_price"].rolling(LIQUIDITY_LOOKBACK).max().iloc[-2]
+    recent_low = df["low_price"].rolling(LIQUIDITY_LOOKBACK).min().iloc[-2]
+
+    distance_to_resistance = recent_high - close_price
+    liquidity_ratio = (
+        distance_to_resistance / range_20 if range_20 > 0 else 0
+    )
+
+    # =============================
+    # R:R FILTER
+    # =============================
+
+    risk = close_price - window["low_price"].min()
+    reward = distance_to_resistance
+
+    rr_ratio = reward / risk if risk > 0 else 0
+
+    # =============================
+    # BREAKOUT CONFIRMATION
+    # =============================
+
+    range_high = window["high_price"].max()
+
+    candle_body = abs(current["close_price"] - current["open_price"])
+    candle_range = current["high_price"] - current["low_price"]
+
+    strong_body = (candle_body / candle_range) > 0.7 if candle_range > 0 else False
+
+    breakout_confirmed = (
+        close_price > range_high and
+        base_volume > 1.5 * avg_vol and
+        oi_change > 0 and
+        strong_body
+    )
 
     return {
         "symbol": symbol_name,
@@ -200,83 +223,36 @@ def evaluate_symbol(df, symbol_name):
         "exhaustion_score": round(exhaustion_score, 2),
         "range_ratio": round(range_ratio, 4),
         "volume_ratio": round(volume_ratio, 4),
-        "oi_price_relation": oi_price_relation,
+        "oi_state": oi_state,
         "taker_ratio": round(taker_ratio, 4),
-        "funding_delta": round(funding_delta, 6)
+        "liquidity_ratio": round(liquidity_ratio, 2),
+        "rr_ratio": round(rr_ratio, 2),
+        "breakout_confirmed": breakout_confirmed
     }
 
 
 # =============================
-# MODEL SCAN REPORT
+# SCAN REPORT
 # =============================
 
 def print_scan_report(results):
 
-    high_expansion = []
-    directional_extreme = []
-    exhaustion_risk = []
+    qualified_longs = []
 
     for r in results:
-        if r["expansion_score"] > 65:
-            high_expansion.append(r["symbol"])
+        if (
+            r["expansion_score"] > 70 and
+            r["directional_score"] > 40 and
+            r["exhaustion_score"] < 60 and
+            r["liquidity_ratio"] >= 1.5 and
+            r["rr_ratio"] >= MIN_RR and
+            r["breakout_confirmed"]
+        ):
+            qualified_longs.append(r["symbol"])
 
-        if abs(r["directional_score"]) > 50:
-            directional_extreme.append(r["symbol"])
-
-        if r["exhaustion_score"] > 70:
-            exhaustion_risk.append(r["symbol"])
-
-    print("\n===== MODEL SCAN REPORT =====")
-    print("High Expansion Candidates:", high_expansion)
-    print("Directional Extremes:", directional_extreme)
-    print("Exhaustion Risk:", exhaustion_risk)
+    print("\n===== MODEL v2 REPORT =====")
+    print("Qualified Explosion Longs:", qualified_longs)
     print("================================\n")
-
-
-# =============================
-# DETERMINISTIC GPT PROMPT
-# =============================
-
-def generate_analysis_prompt():
-    return """
-Quantitative Scan – Perpetual Futures – 1H
-
-Input:
-Array of symbols with:
-- expansion_score (0–100)
-- directional_score (-100 to +100)
-- exhaustion_score (0–100)
-- range_ratio
-- volume_ratio
-- oi_price_relation (-1, 0, 1)
-- taker_ratio
-- funding_delta
-
-Rules (STRICT NUMERIC LOGIC ONLY):
-
-Expansion Classification:
->70 = High Expansion
-60–70 = Building
-<60 = Compression
-
-Directional Classification:
->50 = Strong Long
-30–50 = Moderate Long
--30 to 30 = Neutral
--30 to -50 = Moderate Short
-<-50 = Strong Short
-
-Exhaustion:
->70 = Exhausted
-50–70 = Elevated
-<50 = Healthy
-
-Watchlist:
-LONG if Expansion >65 AND Directional >40 AND Exhaustion <60
-SHORT if Expansion >65 AND Directional <-40 AND Exhaustion <60
-SQUEEZE if Expansion >65 AND abs(Directional)>50 AND volume_ratio<1
-EXHAUSTION_ALERT if Exhaustion >70
-""".strip()
 
 
 # =============================
@@ -299,15 +275,14 @@ if __name__ == "__main__":
     os.makedirs("signals", exist_ok=True)
 
     timestamp = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y%m%d_%H%M%S")
-    filename = f"signals/quant_scan_raw_{timestamp}.json"
+    filename = f"signals/quant_scan_v2_{timestamp}.json"
 
     output = {
         "timeframe": "1H",
-        "symbols": evaluation_results,
-        "analysis_prompt": generate_analysis_prompt()
+        "symbols": evaluation_results
     }
 
     with open(filename, "w") as f:
         json.dump(output, f, indent=4)
 
-    print("Raw scan exported:", filename)
+    print("Scan exported:", filename)
