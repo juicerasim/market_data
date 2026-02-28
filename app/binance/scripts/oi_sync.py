@@ -1,15 +1,14 @@
 import requests
 import json
 from datetime import datetime, timezone
-
 from sqlalchemy import text
 from app.db import SessionLocal
 from app.redis_client import redis_client
 
 
-# =============================
+# =====================================================
 # CONFIG
-# =============================
+# =====================================================
 
 OI_URL = "https://fapi.binance.com/futures/data/openInterestHist"
 
@@ -20,9 +19,9 @@ REDIS_KEY = "liquid_coins"
 LIMIT = 1000
 
 
-# =============================
+# =====================================================
 # TIME HELPERS
-# =============================
+# =====================================================
 
 def get_latest_closed_hour_ms():
     now_utc = datetime.now(timezone.utc)
@@ -30,9 +29,9 @@ def get_latest_closed_hour_ms():
     return int(closed_hour.timestamp() * 1000)
 
 
-# =============================
-# DB HELPERS
-# =============================
+# =====================================================
+# DATABASE HELPERS
+# =====================================================
 
 def get_latest_oi_time(symbol):
     db = SessionLocal()
@@ -44,6 +43,16 @@ def get_latest_oi_time(symbol):
         """)
         row = db.execute(q, {"symbol": symbol}).fetchone()
         return int(row[0]) if row and row[0] else None
+    finally:
+        db.close()
+
+
+def get_symbols_from_db():
+    db = SessionLocal()
+    try:
+        q = text("SELECT DISTINCT symbol FROM open_interest_1h")
+        rows = db.execute(q).fetchall()
+        return [row[0] for row in rows]
     finally:
         db.close()
 
@@ -72,11 +81,12 @@ def insert_oi_batch(rows):
         db.close()
 
 
-# =============================
-# API CALL
-# =============================
+# =====================================================
+# API FETCH
+# =====================================================
 
 def fetch_oi(symbol, start_time, end_time):
+
     params = {
         "symbol": symbol,
         "period": INTERVAL,
@@ -94,9 +104,9 @@ def fetch_oi(symbol, start_time, end_time):
     return resp.json()
 
 
-# =============================
-# CORE SYNC
-# =============================
+# =====================================================
+# CORE SYNC PER SYMBOL (PAGINATED)
+# =====================================================
 
 def sync_symbol_oi(symbol):
 
@@ -105,9 +115,9 @@ def sync_symbol_oi(symbol):
     latest_closed = get_latest_closed_hour_ms()
     latest_db = get_latest_oi_time(symbol)
 
-    # Determine backfill start
+    # Determine start time
     if not latest_db:
-        print("First sync → 30-day OI backfill")
+        print("First sync → 30-day backfill")
         start_ts = latest_closed - (BACKFILL_DAYS * 24 * INTERVAL_MS)
     else:
         if latest_db >= latest_closed:
@@ -117,57 +127,76 @@ def sync_symbol_oi(symbol):
 
     end_ts = latest_closed
 
-    oi_data = fetch_oi(symbol, start_ts, end_ts)
+    total_inserted = 0
 
-    if not oi_data:
-        print("No OI data returned.")
-        return
+    while start_ts <= end_ts:
 
-    rows = []
+        oi_data = fetch_oi(symbol, start_ts, end_ts)
 
-    for item in oi_data:
+        if not oi_data:
+            break
 
-        # Raw timestamp from Binance (UTC ms)
-        ts = int(item["timestamp"])
+        rows = []
 
-        # Normalize to exact 1H boundary
-        ts = ts - (ts % INTERVAL_MS)
+        for item in oi_data:
 
-        # Convert to UTC datetime
-        open_time_utc = datetime.fromtimestamp(
-            ts / 1000,
-            tz=timezone.utc
-        )
+            ts = int(item["timestamp"])
+            ts = ts - (ts % INTERVAL_MS)  # normalize to 1h boundary
 
-        rows.append({
-            "symbol": item["symbol"],  # safer than outer symbol
-            "open_time": ts,
-            "open_time_utc": open_time_utc,
-            "open_interest": float(item["sumOpenInterest"]),
-            "oi_notional": float(item["sumOpenInterestValue"]),
-            "cmc_circulating_supply": (
-                float(item["CMCCirculatingSupply"])
-                if item.get("CMCCirculatingSupply")
-                else None
+            open_time_utc = datetime.fromtimestamp(
+                ts / 1000,
+                tz=timezone.utc
             )
-        })
 
-    insert_oi_batch(rows)
+            rows.append({
+                "symbol": item["symbol"],
+                "open_time": ts,
+                "open_time_utc": open_time_utc,
+                "open_interest": float(item["sumOpenInterest"]),
+                "oi_notional": float(item["sumOpenInterestValue"]),
+            })
 
-    print(f"Inserted/Updated {len(rows)} OI rows")
+        insert_oi_batch(rows)
+        total_inserted += len(rows)
+
+        last_ts = int(oi_data[-1]["timestamp"])
+        last_ts = last_ts - (last_ts % INTERVAL_MS)
+
+        # Forward-only safety
+        if last_ts < start_ts:
+            print("Cursor stalled — stopping to prevent infinite loop.")
+            break
+
+        start_ts = last_ts + INTERVAL_MS
+
+        # If less than LIMIT → no more pages
+        if len(oi_data) < LIMIT:
+            break
+
+    print(f"Inserted/Updated {total_inserted} OI rows")
 
 
-# =============================
+# =====================================================
 # ENTRY
-# =============================
+# =====================================================
 
 if __name__ == "__main__":
 
-    symbols = json.loads(redis_client.get(REDIS_KEY) or "[]")
-
     print("Starting standalone OI sync...\n")
 
-    for symbol in symbols:
-        sync_symbol_oi(symbol)
+    # Redis symbols
+    redis_symbols = json.loads(redis_client.get(REDIS_KEY) or "[]")
+
+    # DB symbols
+    db_symbols = get_symbols_from_db()
+
+    # UNION(redis + db)
+    symbols = sorted(set(redis_symbols) | set(db_symbols))
+
+    if not symbols:
+        print("No symbols found.")
+    else:
+        for symbol in symbols:
+            sync_symbol_oi(symbol)
 
     print("\nAll OI symbols processed.")

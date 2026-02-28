@@ -1,34 +1,45 @@
 import requests
 import json
 from datetime import datetime, timezone
-
 from sqlalchemy import text
 from app.db import SessionLocal
 from app.redis_client import redis_client
 
 
-# =============================
+# =====================================================
 # CONFIG
-# =============================
+# =====================================================
 
 FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
 
-REDIS_KEY = "liquid_coins"
+FUNDING_INTERVAL_MS = 8 * 60 * 60 * 1000
 BACKFILL_DAYS = 30
-LIMIT = 1000  # Binance max per request
+REDIS_KEY = "liquid_coins"
+LIMIT = 1000
 
 
-# =============================
+# =====================================================
 # TIME HELPERS
-# =============================
+# =====================================================
 
-def now_utc_ms():
-    return int(datetime.now(timezone.utc).timestamp() * 1000)
+def get_latest_closed_funding_ms():
+    """
+    Returns last closed 8H funding timestamp in UTC ms.
+    """
+    now_utc = datetime.now(timezone.utc)
+    hour_block = (now_utc.hour // 8) * 8
+    closed_time = now_utc.replace(
+        hour=hour_block,
+        minute=0,
+        second=0,
+        microsecond=0
+    )
+    return int(closed_time.timestamp() * 1000)
 
 
-# =============================
-# DB HELPERS
-# =============================
+# =====================================================
+# DATABASE HELPERS
+# =====================================================
 
 def get_latest_funding_time(symbol):
     db = SessionLocal()
@@ -40,6 +51,16 @@ def get_latest_funding_time(symbol):
         """)
         row = db.execute(q, {"symbol": symbol}).fetchone()
         return int(row[0]) if row and row[0] else None
+    finally:
+        db.close()
+
+
+def get_symbols_from_db():
+    db = SessionLocal()
+    try:
+        q = text("SELECT DISTINCT symbol FROM funding_rate_8h")
+        rows = db.execute(q).fetchall()
+        return [row[0] for row in rows]
     finally:
         db.close()
 
@@ -68,21 +89,18 @@ def insert_funding_batch(rows):
         db.close()
 
 
-# =============================
-# API CALL
-# =============================
+# =====================================================
+# API FETCH
+# =====================================================
 
-def fetch_funding(symbol, start_time=None, end_time=None):
+def fetch_funding(symbol, start_time, end_time):
 
     params = {
         "symbol": symbol,
+        "startTime": start_time,
+        "endTime": end_time,
         "limit": LIMIT
     }
-
-    if start_time:
-        params["startTime"] = start_time
-    if end_time:
-        params["endTime"] = end_time
 
     resp = requests.get(FUNDING_URL, params=params, timeout=10)
 
@@ -93,38 +111,41 @@ def fetch_funding(symbol, start_time=None, end_time=None):
     return resp.json()
 
 
-# =============================
-# CORE SYNC
-# =============================
+# =====================================================
+# CORE SYNC PER SYMBOL (PAGINATED)
+# =====================================================
 
 def sync_symbol_funding(symbol):
 
     print(f"\nProcessing funding for {symbol}")
 
-    current_ms = now_utc_ms()
+    latest_closed = get_latest_closed_funding_ms()
     latest_db = get_latest_funding_time(symbol)
 
-    # Determine start point
     if not latest_db:
         print("First sync → 30-day funding backfill")
-        start_ts = current_ms - (BACKFILL_DAYS * 24 * 60 * 60 * 1000)
+        start_ts = latest_closed - (
+            BACKFILL_DAYS * 24 * 60 * 60 * 1000
+        )
     else:
-        print("Incremental sync from last stored funding time")
-        start_ts = latest_db + 1
+        if latest_db >= latest_closed:
+            print("Funding already up to date.")
+            return
+        start_ts = latest_db + FUNDING_INTERVAL_MS
 
-    end_ts = current_ms
+    end_ts = latest_closed
+    total_inserted = 0
 
-    while True:
+    while start_ts <= end_ts:
 
-        funding_data = fetch_funding(symbol, start_ts, end_ts)
+        data = fetch_funding(symbol, start_ts, end_ts)
 
-        if not funding_data:
-            print("No more funding data.")
+        if not data:
             break
 
         rows = []
 
-        for item in funding_data:
+        for item in data:
 
             ts = int(item["fundingTime"])
 
@@ -138,32 +159,44 @@ def sync_symbol_funding(symbol):
                 "funding_time": ts,
                 "funding_time_utc": funding_time_utc,
                 "funding_rate": float(item["fundingRate"]),
-                "mark_price": float(item["markPrice"])
+                "mark_price": float(item["markPrice"]),
             })
 
         insert_funding_batch(rows)
+        total_inserted += len(rows)
 
-        print(f"Inserted/Updated {len(rows)} funding rows")
+        last_ts = int(data[-1]["fundingTime"])
 
-        # If returned less than LIMIT, no more pages
-        if len(funding_data) < LIMIT:
+        # Forward-only safety
+        if last_ts < start_ts:
+            print("Cursor stalled — stopping.")
             break
 
-        # Otherwise continue from last timestamp
-        start_ts = int(funding_data[-1]["fundingTime"]) + 1
+        start_ts = last_ts + FUNDING_INTERVAL_MS
+
+        if len(data) < LIMIT:
+            break
+
+    print(f"Inserted/Updated {total_inserted} funding rows")
 
 
-# =============================
+# =====================================================
 # ENTRY
-# =============================
+# =====================================================
 
 if __name__ == "__main__":
 
-    symbols = json.loads(redis_client.get(REDIS_KEY) or "[]")
-
     print("Starting funding sync...\n")
 
-    for symbol in symbols:
-        sync_symbol_funding(symbol)
+    redis_symbols = json.loads(redis_client.get(REDIS_KEY) or "[]")
+    db_symbols = get_symbols_from_db()
+
+    symbols = sorted(set(redis_symbols) | set(db_symbols))
+
+    if not symbols:
+        print("No symbols found.")
+    else:
+        for symbol in symbols:
+            sync_symbol_funding(symbol)
 
     print("\nAll funding symbols processed.")
