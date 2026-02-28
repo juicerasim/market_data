@@ -3,23 +3,29 @@ import time
 import json
 import os
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import text
+from sqlalchemy import func
+from app.config import TIMEFRAMES
+from app.redis_client import redis_client
+from app.binance.scripts.insert import insert_candles_batch, MODEL_MAP
+from app.binance.payload_builder import build_payloads
 from app.db import SessionLocal
 
-from app.redis_client import redis_client
-from app.binance.scripts.insert import insert_candles_batch
-from app.binance.payload_builder import build_payloads
 
+# ======================================================
+# CONFIG
+# ======================================================
 
 URL = "https://fapi.binance.com/fapi/v1/klines"
 LIMIT = 500
 REDIS_KEY = "liquid_coins"
+TEST_SYMBOLS = ["BTCUSDT"]
+TEST_MODE = False
+IST = ZoneInfo("Asia/Kolkata")
 
+MAX_GLOBAL_LOOPS = 100000  # hard stop safety
 
-# --------------------------------------------------
-# Logger (Console + JSONL File Per Run)
-# --------------------------------------------------
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -29,15 +35,13 @@ LOG_FILE = os.path.join(LOG_DIR, f"backfill_{RUN_ID}.jsonl")
 print(f"[LOGGER] Writing logs → {LOG_FILE}")
 
 
+# ======================================================
+# LOGGER
+# ======================================================
+
 def log(msg, **extra):
     now = datetime.now(timezone.utc).strftime("%H:%M:%S")
-
-    record = {
-        "time": now,
-        "msg": msg,
-        **extra,
-    }
-
+    record = {"time": now, "msg": msg, **extra}
     print(f"[{now}] {msg}")
 
     with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -45,243 +49,236 @@ def log(msg, **extra):
         f.flush()
 
 
-# --------------------------------------------------
-# Helpers
-# --------------------------------------------------
+# ======================================================
+# TIME HELPERS
+# ======================================================
+
 def datetime_to_ms(dt: datetime) -> int:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return int(dt.timestamp() * 1000)
 
 
-def ms_to_utc(ms):
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime(
+def ms_to_ist(ms):
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(IST).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
 
 
-# --------------------------------------------------
-# DB: Read symbols from 1m candles
-# --------------------------------------------------
-def get_symbols_from_db():
-    db = SessionLocal()
+def get_tf_ms(tf):
+    if tf in TIMEFRAMES:
+        return int(TIMEFRAMES[tf]["tf_ms"])
+    fallback = {
+        "1m": 60_000,
+        "15m": 900_000,
+        "1h": 3_600_000,
+        "4h": 14_400_000,
+        "1d": 86_400_000,
+    }
+    return fallback.get(tf)
+
+
+# ======================================================
+# SYMBOL LOADING
+# ======================================================
+
+def normalize_symbols(symbols):
+    return sorted({s.strip().upper() for s in symbols if s and s.strip()})
+
+
+def get_symbols_from_redis():
+    raw = redis_client.get(REDIS_KEY)
+    if not raw:
+        return []
+
     try:
-        q = text("""
-            SELECT DISTINCT symbol
-            FROM candles_1m
-        """)
-        rows = db.execute(q).fetchall()
-        symbols = [r[0] for r in rows]
+        data = json.loads(raw)
+    except Exception:
+        log("[REDIS ERROR] Invalid JSON")
+        return []
 
-        log("[DB] Loaded symbols from DB", count=len(symbols))
-        return symbols
+    return normalize_symbols(data if isinstance(data, list) else [])
+
+
+def get_symbols(symbols=None, btc_only=False):
+    if symbols:
+        return normalize_symbols(symbols)
+
+    if btc_only:
+        return TEST_SYMBOLS
+
+    return get_symbols_from_redis()
+
+
+# ======================================================
+# DATABASE
+# ======================================================
+
+def get_last_open_time_from_db(symbol: str, tf: str):
+    Model = MODEL_MAP.get(tf)
+    if not Model:
+        return None
+
+    session = SessionLocal()
+    try:
+        return (
+            session.query(func.max(Model.open_time))
+            .filter(Model.symbol == symbol)
+            .scalar()
+        )
     finally:
-        db.close()
+        session.close()
 
 
-# --------------------------------------------------
-# Redis + DB merged symbols
-# --------------------------------------------------
-def get_symbols():
+# ======================================================
+# BINANCE FETCH (NO RETRY)
+# ======================================================
 
-    redis_symbols = []
-    redis_data = redis_client.get(REDIS_KEY)
-
-    if redis_data:
-        redis_symbols = json.loads(redis_data)
-        log("[REDIS] Loaded symbols", count=len(redis_symbols))
-
-    db_symbols = get_symbols_from_db()
-
-    merged = list(set(redis_symbols) | set(db_symbols))
-
-    log("[SYMBOLS] Final merged symbols", count=len(merged))
-
-    return merged
-
-
-# --------------------------------------------------
-# Fetch klines
-# --------------------------------------------------
-def fetch_klines(symbol, tf, start_time=None, end_time=None):
+def fetch_klines(symbol, tf, start_time, end_time):
 
     params = {
         "symbol": symbol,
         "interval": tf,
+        "startTime": start_time,
+        "endTime": end_time,
         "limit": LIMIT,
     }
 
-    if start_time is not None:
-        params["startTime"] = start_time
+    try:
+        resp = requests.get(URL, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
 
-    if end_time is not None:
-        params["endTime"] = end_time
+        if data:
+            log(
+                "[API]",
+                symbol=symbol,
+                candles=len(data),
+                oldest=ms_to_ist(data[0][0]),
+                newest=ms_to_ist(data[-1][0]),
+            )
 
-    log(
-        "[API] Request",
-        symbol=symbol,
-        tf=tf,
-        start=start_time,
-        end=end_time,
-    )
+        return data
 
-    resp = requests.get(URL, params=params, timeout=10)
-    resp.raise_for_status()
-
-    data = resp.json()
-
-    log("[API] Response", symbol=symbol, candles=len(data))
-
-    if data:
-        oldest = data[0][0]
-        newest = data[-1][0]
-        log(
-            "[API] Time Range",
-            symbol=symbol,
-            oldest=ms_to_utc(oldest),
-            newest=ms_to_utc(newest),
-        )
-
-    return data
+    except Exception as e:
+        log("[API ERROR]", symbol=symbol, error=str(e))
+        return []
 
 
-# --------------------------------------------------
-# ROUND ROBIN BACKFILL / SYNC ENGINE
-# --------------------------------------------------
-def backfill_all_symbols(tf, start_date=None, end_date=None):
+# ======================================================
+# MAIN BACKFILL ENGINE
+# ======================================================
+
+def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
+
+    tf_ms = get_tf_ms(tf)
+    if not tf_ms:
+        raise ValueError(f"Unsupported timeframe: {tf}")
 
     now_utc = datetime.now(timezone.utc)
 
-    # Resolve Date Range
-    if start_date is None and end_date is None:
-        end_date = now_utc
+    if start_date is None:
         start_date = now_utc - timedelta(days=365)
-
-    elif start_date is not None and end_date is None:
-        end_date = now_utc
-
-    elif start_date is None and end_date is not None:
-        start_date = end_date - timedelta(days=365)
 
     if start_date.tzinfo is None:
         start_date = start_date.replace(tzinfo=timezone.utc)
 
-    if end_date.tzinfo is None:
-        end_date = end_date.replace(tzinfo=timezone.utc)
-
-    if start_date > end_date:
-        start_date, end_date = end_date, start_date
-
     start_ts = datetime_to_ms(start_date)
-    end_ts = datetime_to_ms(end_date)
 
-    symbols = get_symbols()
+    symbols = get_symbols(symbols=symbols, btc_only=btc_only)
     if not symbols:
         log("[EXIT] No symbols found")
         return
 
-    log("[START]", tf=tf, limit=LIMIT)
-    log("[START] Date Range", start=str(start_date), end=str(end_date))
+    log("[START]", tf=tf, symbols=len(symbols))
 
-    # --------------------------------------------------
-    # STATE with FETCH COUNTER
-    # --------------------------------------------------
-    state = {
-        symbol: {
-            "cursor_end": end_ts,
+    state = {}
+
+    for symbol in symbols:
+
+        last_ts = get_last_open_time_from_db(symbol, tf)
+
+        if last_ts:
+            cursor = last_ts + tf_ms
+            log("[DB RESUME]", symbol=symbol, last=ms_to_ist(last_ts))
+        else:
+            cursor = start_ts
+            log("[DB FRESH]", symbol=symbol, start=ms_to_ist(cursor))
+
+        state[symbol] = {
+            "cursor": cursor,
             "done": False,
-            "fetched": 0,   # 👈 total candles fetched from API
+            "fetched": 0,
         }
-        for symbol in symbols
-    }
 
     loop = 0
 
     while True:
 
         loop += 1
-        log("LOOP START", loop=loop)
+        if loop > MAX_GLOBAL_LOOPS:
+            log("[GLOBAL SAFETY EXIT]")
+            break
 
-        active = sum(1 for v in state.values() if not v["done"])
-        log(
-            "[LOOP STATUS]",
-            active_symbols=active,
-            completed=len(symbols) - active,
-        )
+        active = 0
 
         for symbol in symbols:
 
             info = state[symbol]
-
             if info["done"]:
-                log("[SKIP] completed", symbol=symbol)
                 continue
+
+            active += 1
+
+            end_ts = datetime_to_ms(datetime.now(timezone.utc))
+
+            if info["cursor"] > end_ts:
+                info["done"] = True
+                continue
+
+            previous_cursor = info["cursor"]
 
             klines = fetch_klines(
                 symbol,
                 tf,
-                start_time=start_ts,
-                end_time=info["cursor_end"],
+                start_time=info["cursor"],
+                end_time=end_ts,
             )
 
             if not klines:
-                log("[END] No more history", symbol=symbol)
                 info["done"] = True
                 continue
 
-            # 👇 COUNT FETCHED RECORDS
-            info["fetched"] += len(klines)
-
             payloads = build_payloads(symbol, tf, klines)
-
-            log(
-                "[DB] UPSERT START",
-                symbol=symbol,
-                rows=len(payloads),
-                tf=tf,
-            )
-
             insert_candles_batch(tf, payloads)
 
-            oldest_open_time = klines[0][0]
+            info["fetched"] += len(klines)
+
             newest_open_time = klines[-1][0]
+            info["cursor"] = newest_open_time + tf_ms
 
-            log(
-                "[DB] UPSERT DONE",
-                symbol=symbol,
-                oldest=ms_to_utc(oldest_open_time),
-                newest=ms_to_utc(newest_open_time),
-            )
+            # 🚨 Forward-only safety check
+            if info["cursor"] <= previous_cursor:
+                log("[SAFETY STOP - CURSOR STALLED]", symbol=symbol)
+                info["done"] = True
+                continue
 
-            # move cursor backward
-            info["cursor_end"] = oldest_open_time - 1
-
-            # stop condition
-            if oldest_open_time <= start_ts:
-                log("[STOP] reached start boundary", symbol=symbol)
+            if len(klines) < LIMIT:
                 info["done"] = True
 
             time.sleep(0.12)
 
-        # --------------------------------------------------
-        # FINAL SUMMARY
-        # --------------------------------------------------
-        if all(v["done"] for v in state.values()):
-            log("[FINISH] All symbols completed")
-
-            log("======== FINAL FETCH SUMMARY ========")
-            for sym, info in state.items():
-                log(
-                    "[SUMMARY]",
-                    symbol=sym,
-                    total_fetched=info["fetched"],
-                )
-
+        if active == 0:
             break
 
+    log("======== FINAL SUMMARY ========")
+    for sym, info in state.items():
+        log("[SUMMARY]", symbol=sym, total_fetched=info["fetched"])
 
-# --------------------------------------------------
-# Entry
-# --------------------------------------------------
+
+# ======================================================
+# ENTRY
+# ======================================================
+
 if __name__ == "__main__":
     backfill_all_symbols("1h")
