@@ -143,9 +143,9 @@ class CandleBase:
     nullable=True,
     server_default=func.now()   # ⭐ ADD THIS
 )
-    open_interest = Column(Float, nullable=True)
-    funding_rate  = Column(Float, nullable=True)
-    oi_delta_percent  = Column(Float, nullable=True)
+    # open_interest = Column(Float, nullable=True)
+    # funding_rate  = Column(Float, nullable=True)
+    # oi_delta_percent  = Column(Float, nullable=True)
 
 class Candle1D(CandleBase, Base):
     __tablename__ = "candles_1d"
