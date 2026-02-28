@@ -144,6 +144,18 @@ def fetch_klines(symbol, tf, start_time, end_time):
         "limit": LIMIT,
     }
 
+    # 🔍 Log request parameters
+    log(
+        "[API REQUEST]",
+        symbol=symbol,
+        interval=tf,
+        start_ms=start_time,
+        end_ms=end_time,
+        start_ist=ms_to_ist(start_time),
+        end_ist=ms_to_ist(end_time),
+        limit=LIMIT,
+    )
+
     try:
         resp = requests.get(URL, params=params, timeout=10)
         resp.raise_for_status()
@@ -151,7 +163,7 @@ def fetch_klines(symbol, tf, start_time, end_time):
 
         if data:
             log(
-                "[API]",
+                "[API RESPONSE]",
                 symbol=symbol,
                 candles=len(data),
                 oldest=ms_to_ist(data[0][0]),
@@ -163,7 +175,6 @@ def fetch_klines(symbol, tf, start_time, end_time):
     except Exception as e:
         log("[API ERROR]", symbol=symbol, error=str(e))
         return []
-
 
 # ======================================================
 # MAIN BACKFILL ENGINE

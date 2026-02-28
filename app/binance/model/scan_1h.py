@@ -338,10 +338,10 @@ if __name__ == "__main__":
 
     engine = DerivativesModel1H(window=60)
 
-    df = engine.fetch_data(symbols=["PIPPINUSDT"])
+    df = engine.fetch_data(symbols=['PIPPINUSDT'])
     df = engine.calculate_indicators(df)
     df = engine.detect_structure(df)
 
-    output = engine.analyze(df, symbols=["PIPPINUSDT"])
+    output = engine.analyze(df, symbols=['PIPPINUSDT'])
 
     print(json.dumps(output, indent=4, default=str))
