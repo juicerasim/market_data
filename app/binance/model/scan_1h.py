@@ -1,15 +1,23 @@
+#!/usr/bin/env python3
+
 # pressure_scan_1h.py
 
 from datetime import datetime
 from typing import List, Optional
 import logging
 import json
+import time
+import os
 
 import pandas as pd
 from sqlalchemy import select
 from app.models import Candle1H, OpenInterest1H, FundingRate8H
 from app.db import SessionLocal
 
+
+# --------------------------------------------------
+# LOGGING
+# --------------------------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,6 +27,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# --------------------------------------------------
+# MODEL
+# --------------------------------------------------
+
 class DerivativesModel1H:
 
     def __init__(self, window: int = 60):
@@ -27,6 +39,7 @@ class DerivativesModel1H:
     # --------------------------------------------------
     # FETCH STRICT LAST N CANDLES
     # --------------------------------------------------
+
     def fetch_data(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
 
         db = SessionLocal()
@@ -38,7 +51,6 @@ class DerivativesModel1H:
                 stmt = stmt.where(Candle1H.symbol.in_(symbols))
 
             stmt = stmt.order_by(Candle1H.symbol, Candle1H.open_time)
-
             candles = db.execute(stmt).scalars().all()
 
             if not candles:
@@ -47,23 +59,17 @@ class DerivativesModel1H:
             df = pd.DataFrame([c.__dict__ for c in candles])
             df.drop(columns=["_sa_instance_state"], inplace=True)
 
-            if "symbol" not in df.columns:
-                raise ValueError("symbol column missing after candle fetch")
-
-            # Strict last N candles per symbol
             df = (
                 df.sort_values(["symbol", "open_time"])
-                  .groupby("symbol")
-                  .tail(self.window)
+                .groupby("symbol")
+                .tail(self.window)
             )
 
             counts = df.groupby("symbol").size()
             if (counts < self.window).any():
                 raise ValueError("Insufficient candles for strict window requirement")
 
-            # --------------------------------------------------
             # OI JOIN
-            # --------------------------------------------------
             oi_stmt = select(OpenInterest1H)
 
             if symbols:
@@ -76,9 +82,6 @@ class DerivativesModel1H:
 
             oi_df = pd.DataFrame([o.__dict__ for o in oi_records])
             oi_df.drop(columns=["_sa_instance_state"], inplace=True)
-
-            if "open_interest" not in oi_df.columns:
-                raise ValueError("open_interest missing in OI table")
 
             oi_df = oi_df.rename(columns={"open_interest": "oi_external"})
 
@@ -94,9 +97,7 @@ class DerivativesModel1H:
             df["open_interest"] = df["oi_external"]
             df.drop(columns=["oi_external"], inplace=True)
 
-            # --------------------------------------------------
             # FUNDING MAP
-            # --------------------------------------------------
             funding_stmt = select(FundingRate8H)
 
             if symbols:
@@ -109,9 +110,6 @@ class DerivativesModel1H:
 
             funding_df = pd.DataFrame([f.__dict__ for f in funding_records])
             funding_df.drop(columns=["_sa_instance_state"], inplace=True)
-
-            if "funding_rate" not in funding_df.columns:
-                raise ValueError("funding_rate missing in funding table")
 
             funding_df = funding_df.sort_values(["symbol", "funding_time"])
             df = df.sort_values(["symbol", "open_time"])
@@ -136,19 +134,8 @@ class DerivativesModel1H:
     # --------------------------------------------------
     # INDICATORS
     # --------------------------------------------------
+
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-
-        required_raw = [
-            "open_price", "high_price", "low_price", "close_price",
-            "base_volume", "taker_buy_base_volume",
-            "open_interest", "funding_rate"
-        ]
-
-        for col in required_raw:
-            if col not in df.columns:
-                raise ValueError(f"Missing mandatory column: {col}")
-            if df[col].isna().any():
-                raise ValueError(f"Null values detected in {col}")
 
         df["prev_close"] = df.groupby("symbol")["close_price"].shift(1)
 
@@ -167,11 +154,6 @@ class DerivativesModel1H:
             .mean()
             .reset_index(level=0, drop=True)
         )
-
-        latest = df.groupby("symbol").tail(1)
-
-        if latest["atr20"].isna().any():
-            raise ValueError("ATR20 not formed for latest candle")
 
         df["range_ratio"] = (
             (df["high_price"] - df["low_price"]) / df["atr20"]
@@ -193,17 +175,12 @@ class DerivativesModel1H:
             df["taker_buy_base_volume"] / df["base_volume"]
         )
 
-        latest = df.groupby("symbol").tail(1)
-
-        for col in ["range_ratio", "oi_build_6h", "buy_ratio"]:
-            if latest[col].isna().any():
-                raise ValueError(f"Invalid latest indicator: {col}")
-
         return df
 
     # --------------------------------------------------
     # STRUCTURE
     # --------------------------------------------------
+
     def detect_structure(self, df: pd.DataFrame) -> pd.DataFrame:
 
         df["lowest_12h"] = (
@@ -214,19 +191,14 @@ class DerivativesModel1H:
         )
 
         df["prev_lowest_12h"] = df.groupby("symbol")["lowest_12h"].shift(12)
-
         df["higher_low"] = df["lowest_12h"] > df["prev_lowest_12h"]
-
-        latest = df.groupby("symbol").tail(1)
-
-        if latest["higher_low"].isna().any():
-            raise ValueError("Structure detection invalid")
 
         return df
 
     # --------------------------------------------------
     # SCORING
     # --------------------------------------------------
+
     def score(self, row):
 
         compression_score = 0
@@ -253,35 +225,12 @@ class DerivativesModel1H:
         return round(expansion_score, 1), bias
 
     # --------------------------------------------------
-    # COMMENT GENERATOR
+    # ANALYZE (STRICT FORMAT)
     # --------------------------------------------------
-    def generate_comment(self, row, expansion_score, bias):
 
-        if expansion_score > 70:
-            if bias > 30:
-                return "Strong pressure building with bullish positioning. Upside breakout likely."
-            elif bias < -30:
-                return "Strong pressure building with bearish positioning. Downside breakout likely."
-            else:
-                return "Strong pressure building but direction is not clear yet."
-
-        if expansion_score > 40:
-            if bias > 20:
-                return "Price is tight and buyers are slowly building positions. Watch for upside breakout."
-            elif bias < -20:
-                return "Price is tight and sellers are building positions. Watch for downside breakout."
-            else:
-                return "Price is moving in a tight range and pressure is building. Wait for stronger confirmation."
-
-        return "No strong pressure setup. Market is normal."
-
-    # --------------------------------------------------
-    # ANALYZE (FINAL LOCKED FORMAT)
-    # --------------------------------------------------
     def analyze(self, df: pd.DataFrame, symbols: Optional[List[str]] = None):
 
         latest = df.groupby("symbol").tail(1)
-
         results = []
 
         for _, row in latest.iterrows():
@@ -295,25 +244,34 @@ class DerivativesModel1H:
             else:
                 condition = "No strong setup"
 
-            comment = self.generate_comment(row, expansion_score, bias)
+            if expansion_score > 70:
+                if bias > 30:
+                    comment = "Strong pressure building with bullish positioning. Upside breakout likely."
+                elif bias < -30:
+                    comment = "Strong pressure building with bearish positioning. Downside breakout likely."
+                else:
+                    comment = "Strong pressure building but direction is not clear yet."
+            elif expansion_score > 40:
+                if row["oi_build_6h"] > 1:
+                    comment = "Price is moving in a tight range and pressure is building. Open interest is expanding positively. Watch for upside breakout."
+                elif row["oi_build_6h"] < -1:
+                    comment = "Price is moving in a tight range and pressure is building. Open interest is expanding negatively. Watch for downside breakout."
+                else:
+                    comment = "Price is moving in a tight range and pressure is building. Open interest is not strongly bullish or bearish yet. Wait for stronger build above +1% or below -1% before taking directional trade."
+            else:
+                comment = "No strong pressure setup. Market is normal."
 
             results.append({
                 "symbol": row["symbol"],
-
                 "range_ratio": round(row["range_ratio"], 2),
                 "ideal_compression": "< 0.8",
-
                 "oi_build_6h": round(row["oi_build_6h"], 2),
                 "ideal_oi_build": "> +1% or < -1%",
-
                 "direction_bias_score": bias,
                 "bias_scale": "-100 to +100",
-
                 "expansion_score": expansion_score,
                 "expansion_scale": "0 to 100",
-
                 "market_condition": condition,
-
                 "comment": comment
             })
 
@@ -334,14 +292,128 @@ class DerivativesModel1H:
         }
 
 
+# --------------------------------------------------
+# MARKDOWN EXPORT
+# --------------------------------------------------
+
+def export_report_to_markdown(report: dict, output_dir: str = "reports"):
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    dt = datetime.fromisoformat(report["meta"]["analysis_time_ist"])
+    formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    filename = f"scan_report_{formatted_time}.md"
+    filepath = os.path.join(output_dir, filename)
+
+    with open(filepath, "w", encoding="utf-8") as f:
+
+        f.write("# 📊 Pressure Scan Report\n\n")
+
+        # --------------------------------------------------
+        # META
+        # --------------------------------------------------
+        f.write("## 🔎 Meta Information\n\n")
+        f.write(f"- **Analysis Time (IST):** `{report['meta']['analysis_time_ist']}`\n")
+        f.write(f"- **Timeframe:** `{report['meta']['timeframe']}`\n")
+        f.write(f"- **Window Used:** `{report['meta']['window_used']}`\n")
+        f.write(f"- **Symbols Analyzed:** `{', '.join(report['meta']['symbols_analyzed'])}`\n")
+        f.write(f"- **Date Range:** `{report['meta']['date_range_ist']['start']} → {report['meta']['date_range_ist']['end']}`\n")
+        f.write(f"- **Total Symbols:** `{report['meta']['total_symbols']}`\n")
+        f.write(f"- **Total Rows Analyzed:** `{report['meta']['total_rows_analyzed']}`\n\n")
+
+        # --------------------------------------------------
+        # RESULTS
+        # --------------------------------------------------
+        f.write("## 📈 Scan Results\n\n")
+
+        for result in report["results"]:
+
+            expansion = result["expansion_score"]
+            bias = result["direction_bias_score"]
+
+            # Expansion highlight
+            if expansion > 70:
+                expansion_display = f"🔴 **{expansion}**"
+            elif expansion > 40:
+                expansion_display = f"🟡 **{expansion}**"
+            else:
+                expansion_display = f"{expansion}"
+
+            # Bias highlight
+            if bias > 40:
+                bias_display = f"🟢 **{bias}**"
+            elif bias < -40:
+                bias_display = f"🔻 **{bias}**"
+            else:
+                bias_display = f"{bias}"
+
+            f.write(f"### 🪙 {result['symbol']}\n\n")
+
+            f.write(f"- **Range Ratio:** `{result['range_ratio']}`  _(Ideal: {result['ideal_compression']})_\n")
+            f.write(f"- **OI Build (6H):** `{result['oi_build_6h']}`  _(Ideal: {result['ideal_oi_build']})_\n")
+            f.write(f"- **Direction Bias Score:** {bias_display}  _(Scale: {result['bias_scale']})_\n")
+            f.write(f"- **Expansion Score:** {expansion_display}  _(Scale: {result['expansion_scale']})_\n")
+            f.write(f"- **Market Condition:** **{result['market_condition']}**\n\n")
+
+            f.write(f"> {result['comment']}\n\n")
+            f.write("---\n\n")
+
+    logger.info(f"Markdown report exported: {filepath}")
+
+
+# --------------------------------------------------
+# SCHEDULER
+# --------------------------------------------------
+
+def sleep_until_next_interval(interval_minutes: int):
+
+    if 60 % interval_minutes != 0:
+        raise ValueError("interval_minutes must divide 60 evenly")
+
+    now = datetime.now()
+    next_minute = ((now.minute // interval_minutes) + 1) * interval_minutes
+
+    if next_minute >= 60:
+        next_run = now.replace(hour=(now.hour + 1) % 24, minute=0, second=0, microsecond=0)
+    else:
+        next_run = now.replace(minute=next_minute, second=0, microsecond=0)
+
+    sleep_seconds = (next_run - now).total_seconds()
+    if sleep_seconds < 0:
+        sleep_seconds = 0
+
+    logger.info(f"Sleeping {int(sleep_seconds)} seconds until next cycle...")
+    time.sleep(sleep_seconds)
+
+
+# --------------------------------------------------
+# MAIN LOOP
+# --------------------------------------------------
+
 if __name__ == "__main__":
 
     engine = DerivativesModel1H(window=60)
+    symbols_to_scan = ['PIPPINUSDT']
+    interval_minutes = 30
 
-    df = engine.fetch_data(symbols=['PIPPINUSDT'])
-    df = engine.calculate_indicators(df)
-    df = engine.detect_structure(df)
+    logger.info("Pressure Scan 1H Service Started")
 
-    output = engine.analyze(df, symbols=['PIPPINUSDT'])
+    while True:
+        try:
+            logger.info("Running scan...")
 
-    print(json.dumps(output, indent=4, default=str))
+            df = engine.fetch_data(symbols=symbols_to_scan)
+            df = engine.calculate_indicators(df)
+            df = engine.detect_structure(df)
+
+            output = engine.analyze(df, symbols=symbols_to_scan)
+
+            print(json.dumps(output, indent=2, default=str))
+
+            export_report_to_markdown(output)
+
+        except Exception as e:
+            logger.exception(f"Scan failed: {e}")
+
+        sleep_until_next_interval(interval_minutes)
