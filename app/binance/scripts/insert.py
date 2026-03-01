@@ -1,9 +1,10 @@
 from sqlalchemy.dialects.postgresql import insert
-from app.models import Candle1M, Candle15M, Candle1H, Candle4H, Candle1D
+from app.models import Candle1M, Candle15M, Candle1H, Candle4H, Candle1D, Candle5M
 from app.db import SessionLocal
 from time import sleep
 MODEL_MAP = {
     "1m": Candle1M,
+    "5m": Candle5M,
     "15m": Candle15M,
     "1h": Candle1H,
     "4h": Candle4H,

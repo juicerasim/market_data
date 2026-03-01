@@ -25,7 +25,8 @@ settings = Settings()
 
 TIMEFRAMES = {
     "1m":  {"tf_ms": 60_000,        "table": "candles_1m",  "api": True},
-    # "2m":  {"tf_ms": 120_000,       "table": "candles_2m",  "api": False},  # derived
+    # "2m":  {"tf_ms": 120_000,       "table": "candles_2m",  "api": False},
+    "5m":  {"tf_ms": 300_000,       "table": "candles_5m",  "api": True},  # derived
     "15m": {"tf_ms": 900_000,       "table": "candles_15m", "api": True},
     "1h":  {"tf_ms": 3_600_000,     "table": "candles_1h",  "api": True},
     # "4h":  {"tf_ms": 14_400_000,    "table": "candles_4h",  "api": True},

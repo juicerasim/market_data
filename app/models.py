@@ -173,6 +173,14 @@ class Candle2M(CandleBase, Base):
     open_time = Column(BigInteger, primary_key=True)
 
 
+class Candle5M(CandleBase, Base):
+    __tablename__ = "candles_5m"
+
+    # ⭐ Composite Primary Key
+    symbol = Column(String(20), primary_key=True)
+    open_time = Column(BigInteger, primary_key=True)
+
+
 # -------------------------------------------------
 # 15 Minute Candle
 # -------------------------------------------------
@@ -208,6 +216,18 @@ class Candle4H(CandleBase, Base):
 # -------------------------------------------------
 class OpenInterest1H(Base):
     __tablename__ = "open_interest_1h"
+
+    symbol = Column(String(20), primary_key=True)
+    open_time = Column(BigInteger, primary_key=True)
+
+    open_interest = Column(Float, nullable=False)
+    oi_notional = Column(Float, nullable=False)
+    open_time_utc = Column(DateTime(timezone=True), nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class OpenInterest5M(Base):
+    __tablename__ = "open_interest_5m"
 
     symbol = Column(String(20), primary_key=True)
     open_time = Column(BigInteger, primary_key=True)

@@ -4,13 +4,20 @@ from datetime import datetime
 from typing import List, Optional
 import logging
 import json
+import os
 import time
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sqlalchemy import select
+
 from app.models import Candle1H, OpenInterest1H, FundingRate8H
 from app.db import SessionLocal
 
+
+# --------------------------------------------------
+# LOGGING
+# --------------------------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,6 +26,41 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+IST = ZoneInfo("Asia/Kolkata")
+UTC = ZoneInfo("UTC")
+
+
+# --------------------------------------------------
+# EXPORT FUNCTION (SAME NAMING CONVENTION AS BEFORE)
+# --------------------------------------------------
+
+def export_report(output: dict, folder: str = "reports"):
+    """
+    Export EXACT same JSON shown in terminal.
+    Naming format:
+    scan_report_YYYY-MM-DD HH:MM:SS.md
+    """
+
+    os.makedirs(folder, exist_ok=True)
+
+    analysis_time = output["meta"]["analysis_time_ist"]
+    dt_obj = datetime.fromisoformat(analysis_time)
+    formatted_time = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
+
+    filename = f"scan_report_{formatted_time}.md"
+    filepath = os.path.join(folder, filename)
+
+    with open(filepath, "w") as f:
+        f.write("```json\n")
+        json.dump(output, f, indent=2, default=str)
+        f.write("\n```")
+
+    logger.info(f"Report exported to {filepath}")
+
+
+# --------------------------------------------------
+# MODEL
+# --------------------------------------------------
 
 class DerivativesModel1H:
 
@@ -26,19 +68,41 @@ class DerivativesModel1H:
         self.window = window
 
     # --------------------------------------------------
+    # IST → EPOCH MS
+    # --------------------------------------------------
+
+    def ist_to_epoch_ms(self, dt: datetime) -> int:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST)
+        dt_utc = dt.astimezone(UTC)
+        return int(dt_utc.timestamp() * 1000)
+
+    # --------------------------------------------------
     # FETCH DATA
     # --------------------------------------------------
 
-    def fetch_data(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
+    def fetch_data(
+        self,
+        symbols: Optional[List[str]] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> pd.DataFrame:
 
         db = SessionLocal()
 
         try:
-            # ---------------- CANDLES ----------------
             stmt = select(Candle1H)
 
             if symbols:
                 stmt = stmt.where(Candle1H.symbol.in_(symbols))
+
+            if start_time:
+                start_epoch = self.ist_to_epoch_ms(start_time)
+                stmt = stmt.where(Candle1H.open_time >= start_epoch)
+
+            if end_time:
+                end_epoch = self.ist_to_epoch_ms(end_time)
+                stmt = stmt.where(Candle1H.open_time <= end_epoch)
 
             stmt = stmt.order_by(Candle1H.symbol, Candle1H.open_time)
 
@@ -49,28 +113,43 @@ class DerivativesModel1H:
             df = pd.DataFrame([c.__dict__ for c in candles])
             df.drop(columns=["_sa_instance_state"], inplace=True)
 
-            df["open_time"] = pd.to_datetime(df["open_time"])
-
-            df = (
-                df.sort_values(["symbol", "open_time"])
-                .groupby("symbol")
-                .tail(self.window)
-                .reset_index(drop=True)
+            df["open_time"] = pd.to_datetime(
+                df["open_time"], unit="ms", utc=True
             )
 
-            # ---------------- OPEN INTEREST ----------------
+            # Default: last N candles if no range provided
+            if not start_time and not end_time:
+                df = (
+                    df.sort_values(["symbol", "open_time"])
+                    .groupby("symbol")
+                    .tail(self.window)
+                    .reset_index(drop=True)
+                )
+
+            # ---------------- OI ----------------
+
             oi_stmt = select(OpenInterest1H)
 
             if symbols:
                 oi_stmt = oi_stmt.where(OpenInterest1H.symbol.in_(symbols))
 
-            oi_records = db.execute(oi_stmt).scalars().all()
-            if not oi_records:
-                raise ValueError("No OI records found.")
+            if start_time:
+                oi_stmt = oi_stmt.where(
+                    OpenInterest1H.open_time >= start_epoch
+                )
 
+            if end_time:
+                oi_stmt = oi_stmt.where(
+                    OpenInterest1H.open_time <= end_epoch
+                )
+
+            oi_records = db.execute(oi_stmt).scalars().all()
             oi_df = pd.DataFrame([o.__dict__ for o in oi_records])
             oi_df.drop(columns=["_sa_instance_state"], inplace=True)
-            oi_df["open_time"] = pd.to_datetime(oi_df["open_time"])
+
+            oi_df["open_time"] = pd.to_datetime(
+                oi_df["open_time"], unit="ms", utc=True
+            )
 
             df = df.merge(
                 oi_df[["symbol", "open_time", "open_interest"]],
@@ -82,35 +161,34 @@ class DerivativesModel1H:
                 raise ValueError("Missing OI values after merge")
 
             # ---------------- FUNDING ----------------
+
             funding_stmt = select(FundingRate8H)
 
             if symbols:
-                funding_stmt = funding_stmt.where(FundingRate8H.symbol.in_(symbols))
+                funding_stmt = funding_stmt.where(
+                    FundingRate8H.symbol.in_(symbols)
+                )
+
+            funding_stmt = funding_stmt.order_by(
+                FundingRate8H.symbol,
+                FundingRate8H.funding_time
+            )
 
             funding_records = db.execute(funding_stmt).scalars().all()
-            if not funding_records:
-                raise ValueError("No funding records found.")
-
             funding_df = pd.DataFrame([f.__dict__ for f in funding_records])
             funding_df.drop(columns=["_sa_instance_state"], inplace=True)
-            funding_df["funding_time"] = pd.to_datetime(funding_df["funding_time"])
+
+            funding_df["funding_time"] = pd.to_datetime(
+                funding_df["funding_time"], unit="ms", utc=True
+            )
 
             merged_frames = []
 
             for sym in df["symbol"].unique():
-
-                left = (
-                    df[df["symbol"] == sym]
-                    .sort_values("open_time")
-                    .reset_index(drop=True)
-                )
-
-                right = (
-                    funding_df[funding_df["symbol"] == sym]
-                    .sort_values("funding_time")
-                    .reset_index(drop=True)
-                    .drop(columns=["symbol"])
-                )
+                left = df[df["symbol"] == sym].sort_values("open_time")
+                right = funding_df[
+                    funding_df["symbol"] == sym
+                ].sort_values("funding_time").drop(columns=["symbol"])
 
                 merged = pd.merge_asof(
                     left,
@@ -119,9 +197,6 @@ class DerivativesModel1H:
                     right_on="funding_time",
                     direction="backward"
                 )
-
-                if merged["funding_rate"].isna().any():
-                    raise ValueError(f"Funding mapping incomplete for {sym}")
 
                 merged_frames.append(merged)
 
@@ -133,7 +208,7 @@ class DerivativesModel1H:
             db.close()
 
     # --------------------------------------------------
-    # INDICATORS
+    # INDICATORS (UNCHANGED)
     # --------------------------------------------------
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -181,7 +256,7 @@ class DerivativesModel1H:
         return df
 
     # --------------------------------------------------
-    # SCORING
+    # SCORING (UNCHANGED)
     # --------------------------------------------------
 
     def score(self, row):
@@ -207,38 +282,12 @@ class DerivativesModel1H:
         return round(expansion_score, 1), bias
 
     # --------------------------------------------------
-    # COMMENT
+    # ANALYZE (UNCHANGED STRUCTURE)
     # --------------------------------------------------
 
-    def generate_comment(self, row, expansion_score, bias):
-
-        if expansion_score > 70:
-            if bias > 30:
-                return "Strong pressure building with bullish positioning. Upside breakout likely."
-            elif bias < -30:
-                return "Strong pressure building with bearish positioning. Downside breakout likely."
-            else:
-                return "Strong pressure building but direction is not clear yet."
-
-        elif expansion_score > 40:
-            if row["oi_build_6h"] > 1:
-                return "Price is moving in a tight range and pressure is building. Open interest is expanding positively. Watch for upside breakout."
-            elif row["oi_build_6h"] < -1:
-                return "Price is moving in a tight range and pressure is building. Open interest is expanding negatively. Watch for downside breakout."
-            else:
-                return "Price is moving in a tight range and pressure is building. Open interest is not strongly bullish or bearish yet. Wait for stronger build above +1% or below -1% before taking directional trade."
-
-        else:
-            return "No strong pressure setup. Market is normal."
-
-    # --------------------------------------------------
-    # ANALYZE
-    # --------------------------------------------------
-
-    def analyze(self, df: pd.DataFrame, symbols: Optional[List[str]] = None):
+    def analyze(self, df: pd.DataFrame, symbols=None):
 
         latest = df.groupby("symbol").tail(1)
-
         results = []
 
         for _, row in latest.iterrows():
@@ -252,37 +301,40 @@ class DerivativesModel1H:
             else:
                 condition = "No strong setup"
 
-            comment = self.generate_comment(row, expansion_score, bias)
+            comment = (
+                "Strong pressure building with bullish positioning. Upside breakout likely."
+                if bias > 30 else
+                "Strong pressure building with bearish positioning. Downside breakout likely."
+                if bias < -30 else
+                "No strong pressure setup. Market is normal."
+            )
 
             results.append({
                 "symbol": row["symbol"],
-
                 "range_ratio": round(row["range_ratio"], 2),
                 "ideal_compression": "< 0.8",
-
                 "oi_build_6h": round(row["oi_build_6h"], 2),
                 "ideal_oi_build": "> +1% or < -1%",
-
                 "direction_bias_score": bias,
                 "bias_scale": "-100 to +100",
-
                 "expansion_score": expansion_score,
                 "expansion_scale": "0 to 100",
-
                 "market_condition": condition,
-
                 "comment": comment
             })
 
+        start_ist = df["open_time"].min().astimezone(IST)
+        end_ist = df["open_time"].max().astimezone(IST)
+
         return {
             "meta": {
-                "analysis_time_ist": datetime.now().isoformat(),
+                "analysis_time_ist": datetime.now(IST).isoformat(),
                 "timeframe": "1H",
                 "window_used": f"{self.window} candles",
-                "symbols_analyzed": symbols if symbols else list(latest["symbol"].unique()),
+                "symbols_analyzed": symbols,
                 "date_range_ist": {
-                    "start": df["open_time"].min().isoformat(),
-                    "end": df["open_time"].max().isoformat(),
+                    "start": start_ist.isoformat(),
+                    "end": end_ist.isoformat()
                 },
                 "total_symbols": len(results),
                 "total_rows_analyzed": len(df)
@@ -292,29 +344,46 @@ class DerivativesModel1H:
 
 
 # --------------------------------------------------
-# MAIN LOOP
+# MAIN
 # --------------------------------------------------
 
 if __name__ == "__main__":
 
     engine = DerivativesModel1H(window=60)
-    symbols_to_scan = ['ETHUSDT', 'PIPPINUSDT']
-    # symbols_to_scan = None
+    symbols_to_scan = ["ETHUSDT", "PIPPINUSDT"]
 
-    logger.info("Pressure Scan 1H Service Started")
+    use_timerange = False
+    interval_seconds = 1800
 
-    while True:
-        try:
-            logger.info("Running scan...")
+    if use_timerange:
+        start = datetime(2026, 2, 27, 4, 0)
+        end   = datetime(2026, 3, 1, 6, 30)
 
-            df = engine.fetch_data(symbols=symbols_to_scan)
-            df = engine.calculate_indicators(df)
+        df = engine.fetch_data(
+            symbols=symbols_to_scan,
+            start_time=start,
+            end_time=end
+        )
 
-            output = engine.analyze(df, symbols=symbols_to_scan)
+        df = engine.calculate_indicators(df)
+        output = engine.analyze(df, symbols=symbols_to_scan)
 
-            print(json.dumps(output, indent=2, default=str))
+        print(json.dumps(output, indent=2, default=str))
+        export_report(output)
 
-        except Exception as e:
-            logger.exception(f"Scan failed: {e}")
+    else:
+        while True:
+            try:
+                logger.info("Running live pressure scan...")
 
-        time.sleep(1800)
+                df = engine.fetch_data(symbols=symbols_to_scan)
+                df = engine.calculate_indicators(df)
+                output = engine.analyze(df, symbols=symbols_to_scan)
+
+                print(json.dumps(output, indent=2, default=str))
+                export_report(output)
+
+            except Exception as e:
+                logger.exception(f"Scan failed: {e}")
+
+            time.sleep(interval_seconds)

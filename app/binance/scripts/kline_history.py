@@ -292,4 +292,4 @@ def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
 # ======================================================
 
 if __name__ == "__main__":
-    backfill_all_symbols("1h")
+    backfill_all_symbols("5m")
