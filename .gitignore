@@ -8,6 +8,8 @@
 *.jsonl
 *.json
 *.pyc
+reports/
+logs/
 
 
 # ⚠️ SECURITY: Never commit credentials!
