@@ -81,7 +81,7 @@ class DerivativesModel1H:
             if df["open_interest"].isna().any():
                 raise ValueError("Missing OI values after merge")
 
-            # ---------------- FUNDING (PER SYMBOL SAFE MERGE) ----------------
+            # ---------------- FUNDING ----------------
             funding_stmt = select(FundingRate8H)
 
             if symbols:
@@ -109,10 +109,8 @@ class DerivativesModel1H:
                     funding_df[funding_df["symbol"] == sym]
                     .sort_values("funding_time")
                     .reset_index(drop=True)
+                    .drop(columns=["symbol"])
                 )
-
-                # VERY IMPORTANT: Drop symbol from right
-                right = right.drop(columns=["symbol"])
 
                 merged = pd.merge_asof(
                     left,
@@ -183,10 +181,61 @@ class DerivativesModel1H:
         return df
 
     # --------------------------------------------------
+    # SCORING
+    # --------------------------------------------------
+
+    def score(self, row):
+
+        compression_score = 0
+        if row["range_ratio"] < 0.8:
+            compression_score = min((0.8 - row["range_ratio"]) * 50, 30)
+
+        oi_score = min(abs(row["oi_build_6h"]) * 30, 30)
+
+        expansion_score = compression_score + oi_score
+
+        bias = 0
+        if row["oi_build_6h"] > 1:
+            bias += 40
+        if row["buy_ratio"] > 0.55:
+            bias += 20
+        if row["oi_build_6h"] < -1:
+            bias -= 40
+
+        bias = max(min(bias, 100), -100)
+
+        return round(expansion_score, 1), bias
+
+    # --------------------------------------------------
+    # COMMENT
+    # --------------------------------------------------
+
+    def generate_comment(self, row, expansion_score, bias):
+
+        if expansion_score > 70:
+            if bias > 30:
+                return "Strong pressure building with bullish positioning. Upside breakout likely."
+            elif bias < -30:
+                return "Strong pressure building with bearish positioning. Downside breakout likely."
+            else:
+                return "Strong pressure building but direction is not clear yet."
+
+        elif expansion_score > 40:
+            if row["oi_build_6h"] > 1:
+                return "Price is moving in a tight range and pressure is building. Open interest is expanding positively. Watch for upside breakout."
+            elif row["oi_build_6h"] < -1:
+                return "Price is moving in a tight range and pressure is building. Open interest is expanding negatively. Watch for downside breakout."
+            else:
+                return "Price is moving in a tight range and pressure is building. Open interest is not strongly bullish or bearish yet. Wait for stronger build above +1% or below -1% before taking directional trade."
+
+        else:
+            return "No strong pressure setup. Market is normal."
+
+    # --------------------------------------------------
     # ANALYZE
     # --------------------------------------------------
 
-    def analyze(self, df: pd.DataFrame):
+    def analyze(self, df: pd.DataFrame, symbols: Optional[List[str]] = None):
 
         latest = df.groupby("symbol").tail(1)
 
@@ -194,29 +243,49 @@ class DerivativesModel1H:
 
         for _, row in latest.iterrows():
 
-            expansion_score = 0
-            if row["range_ratio"] < 0.8:
-                expansion_score += 30
-            expansion_score += min(abs(row["oi_build_6h"]) * 30, 30)
-            if row["oi_build_6h"] > 1:
-                bias = 40
-            elif row["oi_build_6h"] < -1:
-                bias = -40
+            expansion_score, bias = self.score(row)
+
+            if expansion_score > 70:
+                condition = "Big move happening or very near"
+            elif expansion_score > 40:
+                condition = "Pressure building"
             else:
-                bias = 0
+                condition = "No strong setup"
+
+            comment = self.generate_comment(row, expansion_score, bias)
 
             results.append({
                 "symbol": row["symbol"],
+
                 "range_ratio": round(row["range_ratio"], 2),
+                "ideal_compression": "< 0.8",
+
                 "oi_build_6h": round(row["oi_build_6h"], 2),
-                "expansion_score": round(expansion_score, 1),
-                "direction_bias_score": bias
+                "ideal_oi_build": "> +1% or < -1%",
+
+                "direction_bias_score": bias,
+                "bias_scale": "-100 to +100",
+
+                "expansion_score": expansion_score,
+                "expansion_scale": "0 to 100",
+
+                "market_condition": condition,
+
+                "comment": comment
             })
 
         return {
             "meta": {
                 "analysis_time_ist": datetime.now().isoformat(),
-                "timeframe": "1H"
+                "timeframe": "1H",
+                "window_used": f"{self.window} candles",
+                "symbols_analyzed": symbols if symbols else list(latest["symbol"].unique()),
+                "date_range_ist": {
+                    "start": df["open_time"].min().isoformat(),
+                    "end": df["open_time"].max().isoformat(),
+                },
+                "total_symbols": len(results),
+                "total_rows_analyzed": len(df)
             },
             "results": results
         }
@@ -230,6 +299,7 @@ if __name__ == "__main__":
 
     engine = DerivativesModel1H(window=60)
     symbols_to_scan = ['ETHUSDT', 'PIPPINUSDT']
+    # symbols_to_scan = None
 
     logger.info("Pressure Scan 1H Service Started")
 
@@ -240,7 +310,7 @@ if __name__ == "__main__":
             df = engine.fetch_data(symbols=symbols_to_scan)
             df = engine.calculate_indicators(df)
 
-            output = engine.analyze(df)
+            output = engine.analyze(df, symbols=symbols_to_scan)
 
             print(json.dumps(output, indent=2, default=str))
 
