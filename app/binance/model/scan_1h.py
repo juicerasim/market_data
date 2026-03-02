@@ -350,7 +350,7 @@ class DerivativesModel1H:
 if __name__ == "__main__":
 
     engine = DerivativesModel1H(window=60)
-    symbols_to_scan = ["ETHUSDT", "PIPPINUSDT"]
+    symbols_to_scan = ["ETHUSDT", "PIPPINUSDT", "RIVERUSDT"]
 
     use_timerange = False
     interval_seconds = 1800

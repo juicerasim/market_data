@@ -1,5 +1,6 @@
 import requests
 import json
+import logging
 from datetime import datetime, timezone
 from sqlalchemy import text
 from app.db import SessionLocal
@@ -7,64 +8,71 @@ from app.redis_client import redis_client
 
 
 # =====================================================
-# CONFIG
+# LOGGING CONFIG
 # =====================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+logger = logging.getLogger(__name__)
+
+
+# =====================================================
+# CONSTANTS
+# =====================================================
+
+LIMIT = 1000
+REDIS_KEY = "liquid_coins"
 
 OI_URL = "https://fapi.binance.com/futures/data/openInterestHist"
-
-INTERVAL = "1h"
-INTERVAL_MS = 60 * 60 * 1000
-BACKFILL_DAYS = 30
-REDIS_KEY = "liquid_coins"
-LIMIT = 1000
+SERVER_TIME_URL = "https://fapi.binance.com/fapi/v1/time"
 
 
 # =====================================================
-# TIME HELPERS
+# TIMEFRAME HELPERS
 # =====================================================
 
-def get_latest_closed_hour_ms():
-    now_utc = datetime.now(timezone.utc)
-    closed_hour = now_utc.replace(minute=0, second=0, microsecond=0)
-    return int(closed_hour.timestamp() * 1000)
+def timeframe_to_ms(tf: str) -> int:
+    unit = tf[-1]
+    value = int(tf[:-1])
+
+    if unit == "m":
+        return value * 60 * 1000
+    elif unit == "h":
+        return value * 60 * 60 * 1000
+    elif unit == "d":
+        return value * 24 * 60 * 60 * 1000
+    else:
+        raise ValueError(f"Unsupported timeframe: {tf}")
+
+
+def get_binance_server_time() -> int:
+    resp = requests.get(SERVER_TIME_URL, timeout=5)
+    resp.raise_for_status()
+    return resp.json()["serverTime"]
+
+
+def get_latest_closed_tf_ms(interval_ms: int) -> int:
+    server_time = get_binance_server_time()
+    closed = server_time - (server_time % interval_ms)
+    logger.info(f"Latest closed candle: {closed}")
+    return closed
 
 
 # =====================================================
-# DATABASE HELPERS
+# DATABASE INSERT
 # =====================================================
 
-def get_latest_oi_time(symbol):
-    db = SessionLocal()
-    try:
-        q = text("""
-            SELECT MAX(open_time)
-            FROM open_interest_1h
-            WHERE symbol = :symbol
-        """)
-        row = db.execute(q, {"symbol": symbol}).fetchone()
-        return int(row[0]) if row and row[0] else None
-    finally:
-        db.close()
-
-
-def get_symbols_from_db():
-    db = SessionLocal()
-    try:
-        q = text("SELECT DISTINCT symbol FROM open_interest_1h")
-        rows = db.execute(q).fetchall()
-        return [row[0] for row in rows]
-    finally:
-        db.close()
-
-
-def insert_oi_batch(rows):
+def insert_oi_batch(table_name: str, rows: list):
     if not rows:
         return
 
     db = SessionLocal()
     try:
-        q = text("""
-            INSERT INTO open_interest_1h
+        q = text(f"""
+            INSERT INTO {table_name}
             (symbol, open_time, open_time_utc,
              open_interest, oi_notional)
             VALUES (:symbol, :open_time, :open_time_utc,
@@ -75,21 +83,27 @@ def insert_oi_batch(rows):
                 oi_notional = EXCLUDED.oi_notional,
                 open_time_utc = EXCLUDED.open_time_utc
         """)
+
         db.execute(q, rows)
         db.commit()
+        logger.info(f"{table_name} | Inserted/Updated {len(rows)} rows")
+
+    except Exception as e:
+        logger.error(f"{table_name} | DB error: {e}")
+        db.rollback()
     finally:
         db.close()
 
 
 # =====================================================
-# API FETCH
+# BINANCE FETCH
 # =====================================================
 
-def fetch_oi(symbol, start_time, end_time):
+def fetch_oi(symbol: str, timeframe: str, start_time: int, end_time: int):
 
     params = {
         "symbol": symbol,
-        "period": INTERVAL,
+        "period": timeframe,
         "startTime": start_time,
         "endTime": end_time,
         "limit": LIMIT
@@ -98,105 +112,133 @@ def fetch_oi(symbol, start_time, end_time):
     resp = requests.get(OI_URL, params=params, timeout=10)
 
     if resp.status_code != 200:
-        print(f"Failed OI fetch for {symbol}")
+        logger.error(f"{symbol} | API {resp.status_code} | {resp.text}")
         return []
 
-    return resp.json()
+    data = resp.json()
+    logger.info(f"{symbol} | API rows: {len(data)}")
+    return data
 
 
 # =====================================================
-# CORE SYNC PER SYMBOL (PAGINATED)
+# MAIN FLEXIBLE FUNCTION
 # =====================================================
 
-def sync_symbol_oi(symbol):
+def sync_open_interest(
+    timeframe: str,
+    coins: list[str] | None = None,
+    backfill_days: int = 7
+):
+    """
+    timeframe: '5m', '1h', etc.
+    coins: optional list like ['BTCUSDT', 'ETHUSDT']
+    backfill_days: number of days to backfill
+    """
 
-    print(f"\nProcessing OI for {symbol}")
+    logger.info(f"Starting OI sync | TF={timeframe}")
 
-    latest_closed = get_latest_closed_hour_ms()
-    latest_db = get_latest_oi_time(symbol)
+    interval_ms = timeframe_to_ms(timeframe)
+    max_window_ms = LIMIT * interval_ms
+    table_name = f"open_interest_{timeframe}"
 
-    # Determine start time
-    if not latest_db:
-        print("First sync → 30-day backfill")
-        start_ts = latest_closed - (BACKFILL_DAYS * 24 * INTERVAL_MS)
+    # -------------------------------------------------
+    # Determine symbols
+    # -------------------------------------------------
+
+    if coins:
+        symbols = coins
+        logger.info(f"Using passed coin list ({len(symbols)})")
     else:
-        if latest_db >= latest_closed:
-            print("OI already up to date.")
-            return
-        start_ts = latest_db + INTERVAL_MS
+        symbols = json.loads(redis_client.get(REDIS_KEY) or "[]")
+        logger.info(f"Using Redis symbols ({len(symbols)})")
 
-    end_ts = latest_closed
+    if not symbols:
+        logger.warning("No symbols found.")
+        return
 
-    total_inserted = 0
+    # -------------------------------------------------
+    # Calculate time range
+    # -------------------------------------------------
 
-    while start_ts <= end_ts:
+    latest_closed = get_latest_closed_tf_ms(interval_ms)
 
-        oi_data = fetch_oi(symbol, start_ts, end_ts)
+    start_base = latest_closed - (
+        backfill_days * 24 * 60 * 60 * 1000
+    )
+    start_base -= (start_base % interval_ms)
 
-        if not oi_data:
-            break
+    # -------------------------------------------------
+    # Process each symbol
+    # -------------------------------------------------
 
-        rows = []
+    for symbol in symbols:
 
-        for item in oi_data:
+        logger.info(f"Processing {symbol}")
 
-            ts = int(item["timestamp"])
-            ts = ts - (ts % INTERVAL_MS)  # normalize to 1h boundary
+        start_ts = start_base
+        end_ts = latest_closed
+        total_inserted = 0
 
-            open_time_utc = datetime.fromtimestamp(
-                ts / 1000,
-                tz=timezone.utc
+        while start_ts < end_ts:
+
+            window_end = min(start_ts + max_window_ms, end_ts)
+
+            logger.info(
+                f"{symbol} | Window {start_ts} -> {window_end}"
             )
 
-            rows.append({
-                "symbol": item["symbol"],
-                "open_time": ts,
-                "open_time_utc": open_time_utc,
-                "open_interest": float(item["sumOpenInterest"]),
-                "oi_notional": float(item["sumOpenInterestValue"]),
-            })
+            oi_data = fetch_oi(
+                symbol,
+                timeframe,
+                start_ts,
+                window_end
+            )
 
-        insert_oi_batch(rows)
-        total_inserted += len(rows)
+            if not oi_data:
+                break
 
-        last_ts = int(oi_data[-1]["timestamp"])
-        last_ts = last_ts - (last_ts % INTERVAL_MS)
+            rows = []
 
-        # Forward-only safety
-        if last_ts < start_ts:
-            print("Cursor stalled — stopping to prevent infinite loop.")
-            break
+            for item in oi_data:
 
-        start_ts = last_ts + INTERVAL_MS
+                ts = int(item["timestamp"])
+                ts -= (ts % interval_ms)
 
-        # If less than LIMIT → no more pages
-        if len(oi_data) < LIMIT:
-            break
+                rows.append({
+                    "symbol": item["symbol"],
+                    "open_time": ts,
+                    "open_time_utc": datetime.fromtimestamp(
+                        ts / 1000,
+                        tz=timezone.utc
+                    ),
+                    "open_interest": float(item["sumOpenInterest"]),
+                    "oi_notional": float(item["sumOpenInterestValue"]),
+                })
 
-    print(f"Inserted/Updated {total_inserted} OI rows")
+            insert_oi_batch(table_name, rows)
+            total_inserted += len(rows)
+
+            last_ts = int(oi_data[-1]["timestamp"])
+            last_ts -= (last_ts % interval_ms)
+
+            start_ts = last_ts + interval_ms
+
+            if len(oi_data) < LIMIT:
+                break
+
+        logger.info(f"{symbol} | Total inserted: {total_inserted}")
+
+    logger.info("OI sync completed.")
 
 
 # =====================================================
-# ENTRY
+# OPTIONAL ENTRY POINT
 # =====================================================
 
 if __name__ == "__main__":
 
-    print("Starting standalone OI sync...\n")
-
-    # Redis symbols
-    redis_symbols = json.loads(redis_client.get(REDIS_KEY) or "[]")
-
-    # DB symbols
-    db_symbols = get_symbols_from_db()
-
-    # UNION(redis + db)
-    symbols = sorted(set(redis_symbols) | set(db_symbols))
-
-    if not symbols:
-        print("No symbols found.")
-    else:
-        for symbol in symbols:
-            sync_symbol_oi(symbol)
-
-    print("\nAll OI symbols processed.")
+    # Example usage:
+    sync_open_interest(
+        timeframe="1h",
+        backfill_days=7
+    )
