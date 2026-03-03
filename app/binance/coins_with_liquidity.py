@@ -8,7 +8,7 @@ BASE_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
 ####################
 #This is for binance
 ####################
-def get_top_liquid_coins(percent=0.02):
+def get_top_liquid_coins(percent=0.04):
     print("[LIQ] Fetching market tickers...")
     r = requests.get(BASE_URL, timeout=10)
     r.raise_for_status()
