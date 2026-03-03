@@ -2,7 +2,8 @@ import json
 import pandas as pd
 import numpy as np
 from sqlalchemy import select, distinct
-from datetime import datetime
+from datetime import datetime,  timedelta
+import time
 from app.db import SessionLocal
 from app.models import Candle1H
 from zoneinfo import ZoneInfo
@@ -343,11 +344,37 @@ def check_and_send_alert(output):
 
     send_telegram_message(final_message)
     print("Telegram alert sent.")
+
+def wait_until_next_hour_close():
+    """
+    Wait until next 1H candle close (IST aligned to :30).
+    """
+    now = datetime.now(IST)
+
+    # Next :30 minute mark
+    if now.minute < 30:
+        next_close = now.replace(minute=30, second=5, microsecond=0)
+    else:
+        next_close = (now + timedelta(hours=1)).replace(minute=30, second=5, microsecond=0)
+
+    wait_seconds = (next_close - now).total_seconds()
+
+    print(f"Waiting {int(wait_seconds)} seconds until next candle close at {next_close}")
+    time.sleep(max(wait_seconds, 0))
+# def wait_until_next_hour_close():
+#     """
+#     Testing mode:
+#     Wait fixed 30 seconds between runs.
+#     """
+#     now = datetime.now(IST)
+#     print(f"[{now.strftime('%H:%M:%S')}] Waiting 30 seconds for next test cycle...")
+#     time.sleep(30)
 # -------------------------------------------------------
 # RUN
 # -------------------------------------------------------
 
 if __name__ == "__main__":
+    print("================1====")
 
     # -----------------------------------
     # CONFIG
@@ -367,6 +394,7 @@ if __name__ == "__main__":
 
     else:
         print("Fetching symbols from Candle1H table...")
+        print("====================2")
 
         db = SessionLocal()
 
@@ -387,11 +415,28 @@ if __name__ == "__main__":
     # -----------------------------------
 
     engine = RADX1H(window=60)
+    while True:
+        print("====================")
 
-    df = engine.fetch_data(symbols)
-    df = engine.calculate_indicators(df)
-    output = engine.analyze(df, symbols)
+        wait_until_next_hour_close()
 
-    print(json.dumps(output, indent=2))
-    export_report_json(output)
-    check_and_send_alert(output)
+        try:
+            df = engine.fetch_data(symbols)
+            df = engine.calculate_indicators(df)
+            output = engine.analyze(df, symbols)
+
+            print(json.dumps(output, indent=2))
+
+            export_report_json(output)
+            check_and_send_alert(output)
+
+        except Exception as e:
+            print("Error during scan:", e)
+
+    # df = engine.fetch_data(symbols)
+    # df = engine.calculate_indicators(df)
+    # output = engine.analyze(df, symbols)
+
+    # print(json.dumps(output, indent=2))
+    # export_report_json(output)
+    # check_and_send_alert(output)
