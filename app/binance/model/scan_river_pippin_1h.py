@@ -5,6 +5,8 @@ from sqlalchemy import select, distinct
 from datetime import datetime
 from app.db import SessionLocal
 from app.models import Candle1H
+from zoneinfo import ZoneInfo
+IST = ZoneInfo("Asia/Kolkata")
 
 
 class RADX1H:
@@ -138,6 +140,11 @@ class RADX1H:
     def analyze(self, df, symbols):
 
         results = []
+        start_utc = pd.to_datetime(df["open_time"].min(), unit="ms", utc=True)
+        end_utc = pd.to_datetime(df["open_time"].max(), unit="ms", utc=True)
+
+        start_ist = start_utc.astimezone(IST)
+        end_ist = end_utc.astimezone(IST)
 
         for symbol in symbols:
             row = df[df["symbol"] == symbol].iloc[-1]
@@ -257,15 +264,48 @@ class RADX1H:
                 "timeframe": "1H",
                 "candles_used_per_symbol": self.window,
                 "date_range": {
-                    "start": str(df["open_time"].min()),
-                    "end": str(df["open_time"].max())
+                    "start_ist": start_ist.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end_ist": end_ist.strftime("%Y-%m-%d %H:%M:%S")
                 },
                 "symbols_analyzed": symbols
             },
             "results": results
         }
 
+import os
+from datetime import datetime
 
+def export_report_json(output: dict, folder: str = "reports"):
+    """
+    Export analysis output as JSON file.
+
+    File format:
+    reports/scan_report_YYYY-MM-DD HH-MM-SS.json
+    """
+
+    # Ensure folder exists
+    os.makedirs(folder, exist_ok=True)
+
+    # Get timestamp
+    analysis_time = output["meta"]["analysis_time"]
+
+    # Convert to datetime safely
+    if isinstance(analysis_time, str):
+        dt_obj = datetime.fromisoformat(analysis_time)
+    else:
+        dt_obj = analysis_time
+
+    # IMPORTANT:
+    # Replace ':' because Windows doesn't allow it in filenames
+    formatted_time = dt_obj.strftime("%Y-%m-%d %H-%M-%S")
+
+    filename = f"scan_report_{formatted_time}.json"
+    filepath = os.path.join(folder, filename)
+
+    with open(filepath, "w") as f:
+        json.dump(output, f, indent=2, default=str)
+
+    print(f"Report exported to: {filepath}")
 # -------------------------------------------------------
 # RUN
 # -------------------------------------------------------
@@ -275,7 +315,7 @@ if __name__ == "__main__":
     # -----------------------------------
     # CONFIG
     # -----------------------------------
-    USE_USER_INPUT = True   # Change to False for auto mode
+    # USE_USER_INPUT = True   # Change to False for auto mode
     USE_USER_INPUT = False   # Change to False for auto mode
 
     USER_SYMBOLS = ["PIPPINUSDT", "RIVERUSDT", "ETHUSDT"]
@@ -316,3 +356,4 @@ if __name__ == "__main__":
     output = engine.analyze(df, symbols)
 
     print(json.dumps(output, indent=2))
+    export_report_json(output)
