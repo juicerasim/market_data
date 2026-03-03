@@ -7,6 +7,7 @@ from app.db import SessionLocal
 from app.models import Candle1H
 from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
+from app.telegram import send_telegram_message, format_timestamp_ist
 
 
 class RADX1H:
@@ -306,6 +307,42 @@ def export_report_json(output: dict, folder: str = "reports"):
         json.dump(output, f, indent=2, default=str)
 
     print(f"Report exported to: {filepath}")
+
+def check_and_send_alert(output):
+    """
+    Send Telegram alert if any symbol regime is not Neutral.
+    """
+
+    triggered = []
+
+    for result in output["results"]:
+        if result["regime"] != "Neutral":
+            triggered.append(result)
+
+    if not triggered:
+        print("No non-neutral regimes detected. No alert sent.")
+        return
+
+    # Build message
+    message_lines = []
+    message_lines.append("🚨 Market Regime Alert 🚨\n")
+
+    for r in triggered:
+        message_lines.append(
+            f"Symbol: {r['symbol']}\n"
+            f"Regime: {r['regime']}\n"
+            f"Bias: {r['direction_bias_score']}\n"
+            f"Exhaustion: {r['exhaustion_risk']}\n"
+            f"Pullback: {r['pullback_probability']}\n"
+            f"Reversal: {r['reversal_probability']}\n"
+            f"Guidance: {r['decision_guidance']}\n"
+            f"{'-'*30}"
+        )
+
+    final_message = "\n".join(message_lines)
+
+    send_telegram_message(final_message)
+    print("Telegram alert sent.")
 # -------------------------------------------------------
 # RUN
 # -------------------------------------------------------
@@ -357,3 +394,4 @@ if __name__ == "__main__":
 
     print(json.dumps(output, indent=2))
     export_report_json(output)
+    check_and_send_alert(output)

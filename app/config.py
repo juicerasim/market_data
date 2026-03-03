@@ -11,6 +11,8 @@ class Settings:
     key = os.getenv("API_KEY")
     secret = os.getenv("API_SECRET")
     socketEndpoint = os.getenv("SOCKET_ENDPOINT")
+    telegram_bot_token = os.getenv("telegram_bot_token")
+    telegram_chat_id = os.getenv("telegram_chat_id")
 
     # Validate that required secrets are present
     if not key or not secret:
