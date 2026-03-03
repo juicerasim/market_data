@@ -77,6 +77,38 @@ def get_tf_ms(tf):
     }
     return fallback.get(tf)
 
+# ======================================================
+# CANDLE CLOSE WAITER
+# ======================================================
+
+def wait_until_next_candle_close(tf: str, buffer_seconds: int = 3):
+    """
+    Wait until the next candle close time + buffer.
+    """
+
+    tf_ms = get_tf_ms(tf)
+    if not tf_ms:
+        raise ValueError(f"Unsupported timeframe: {tf}")
+
+    now = datetime.now(timezone.utc)
+    now_ms = datetime_to_ms(now)
+
+    # Find next candle close timestamp
+    next_close_ms = ((now_ms // tf_ms) + 1) * tf_ms
+
+    # Add buffer
+    target_ms = next_close_ms + (buffer_seconds * 1000)
+
+    sleep_seconds = (target_ms - now_ms) / 1000
+
+    if sleep_seconds > 0:
+        log(
+            "[WAITING FOR CANDLE CLOSE]",
+            tf=tf,
+            wake_up_ist=ms_to_ist(target_ms),
+            sleep_seconds=round(sleep_seconds, 2),
+        )
+        time.sleep(sleep_seconds)
 
 # ======================================================
 # SYMBOL LOADING
@@ -292,4 +324,12 @@ def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
 # ======================================================
 
 if __name__ == "__main__":
-    backfill_all_symbols("1h")
+    TF = "1h"
+    while True:
+        try:
+            wait_until_next_candle_close(TF, buffer_seconds=1)
+            backfill_all_symbols(TF)
+
+        except Exception as e:
+            log("[RUNTIME ERROR]", error=str(e))
+            time.sleep(5)

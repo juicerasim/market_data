@@ -1,5 +1,6 @@
 import requests
 import json
+import time
 import logging
 from datetime import datetime, timezone
 from sqlalchemy import text
@@ -59,6 +60,37 @@ def get_latest_closed_tf_ms(interval_ms: int) -> int:
     closed = server_time - (server_time % interval_ms)
     logger.info(f"Latest closed candle: {closed}")
     return closed
+
+# =====================================================
+# CANDLE CLOSE WAITER (FOR OI SYNC)
+# =====================================================
+
+def wait_until_next_candle_close(tf: str, buffer_seconds: int = 3):
+    """
+    Wait until next closed timeframe boundary + buffer.
+    Uses Binance server time to stay exchange-aligned.
+    """
+
+    interval_ms = timeframe_to_ms(tf)
+
+    # Current Binance time
+    server_time = get_binance_server_time()
+
+    # Next close boundary
+    next_close = ((server_time // interval_ms) + 1) * interval_ms
+
+    # Add buffer
+    target = next_close + (buffer_seconds * 1000)
+
+    sleep_seconds = (target - server_time) / 1000
+
+    if sleep_seconds > 0:
+        wake_utc = datetime.fromtimestamp(target / 1000, tz=timezone.utc)
+        logger.info(
+            f"Waiting for candle close | TF={tf} | "
+            f"Wake at {wake_utc} | Sleep {round(sleep_seconds,2)}s"
+        )
+        time.sleep(sleep_seconds)
 
 
 # =====================================================
@@ -237,8 +269,17 @@ def sync_open_interest(
 
 if __name__ == "__main__":
 
-    # Example usage:
-    sync_open_interest(
-        timeframe="1h",
-        backfill_days=7
-    )
+    TF = "1h"
+
+    while True:
+        try:
+            wait_until_next_candle_close(TF, buffer_seconds=3)
+
+            sync_open_interest(
+                timeframe=TF,
+                backfill_days=7   # small window since it runs hourly
+            )
+
+        except Exception as e:
+            logger.error(f"Runtime error: {e}")
+            time.sleep(5)

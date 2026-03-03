@@ -345,21 +345,32 @@ def check_and_send_alert(output):
     send_telegram_message(final_message)
     print("Telegram alert sent.")
 
-def wait_until_next_hour_close():
+def wait_until_next_hour_close(buffer_minutes: int = 2):
     """
-    Wait until next 1H candle close (IST aligned to :30).
+    Wait until next 1H candle close (IST aligned to :30)
+    plus configurable buffer in minutes.
     """
+
     now = datetime.now(IST)
 
-    # Next :30 minute mark
+    # Determine next :30 boundary
     if now.minute < 30:
-        next_close = now.replace(minute=30, second=5, microsecond=0)
+        base_close = now.replace(minute=30, second=0, microsecond=0)
     else:
-        next_close = (now + timedelta(hours=1)).replace(minute=30, second=5, microsecond=0)
+        base_close = (
+            now + timedelta(hours=1)
+        ).replace(minute=30, second=0, microsecond=0)
+
+    # Add buffer
+    next_close = base_close + timedelta(minutes=buffer_minutes)
 
     wait_seconds = (next_close - now).total_seconds()
 
-    print(f"Waiting {int(wait_seconds)} seconds until next candle close at {next_close}")
+    print(
+        f"Waiting {int(wait_seconds)} seconds "
+        f"until execution at {next_close}"
+    )
+
     time.sleep(max(wait_seconds, 0))
 # def wait_until_next_hour_close():
 #     """
