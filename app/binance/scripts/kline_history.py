@@ -24,7 +24,7 @@ TEST_SYMBOLS = ["BTCUSDT"]
 TEST_MODE = False
 IST = ZoneInfo("Asia/Kolkata")
 
-MAX_GLOBAL_LOOPS = 100000  # hard stop safety
+MAX_GLOBAL_LOOPS = 100000
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -42,6 +42,7 @@ print(f"[LOGGER] Writing logs → {LOG_FILE}")
 def log(msg, **extra):
     now = datetime.now(timezone.utc).strftime("%H:%M:%S")
     record = {"time": now, "msg": msg, **extra}
+
     print(f"[{now}] {msg}")
 
     with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -66,37 +67,44 @@ def ms_to_ist(ms):
 
 
 def get_tf_ms(tf):
+
     if tf in TIMEFRAMES:
         return int(TIMEFRAMES[tf]["tf_ms"])
+
     fallback = {
         "1m": 60_000,
+        "5m": 300_000,
         "15m": 900_000,
         "1h": 3_600_000,
         "4h": 14_400_000,
         "1d": 86_400_000,
     }
+
     return fallback.get(tf)
+
+
+def align_timestamp(ts, tf_ms):
+    """
+    Align timestamp to timeframe boundary
+    """
+    return ts - (ts % tf_ms)
+
 
 # ======================================================
 # CANDLE CLOSE WAITER
 # ======================================================
 
 def wait_until_next_candle_close(tf: str, buffer_seconds: int = 3):
-    """
-    Wait until the next candle close time + buffer.
-    """
 
     tf_ms = get_tf_ms(tf)
+
     if not tf_ms:
         raise ValueError(f"Unsupported timeframe: {tf}")
 
     now = datetime.now(timezone.utc)
     now_ms = datetime_to_ms(now)
 
-    # Find next candle close timestamp
     next_close_ms = ((now_ms // tf_ms) + 1) * tf_ms
-
-    # Add buffer
     target_ms = next_close_ms + (buffer_seconds * 1000)
 
     sleep_seconds = (target_ms - now_ms) / 1000
@@ -108,7 +116,9 @@ def wait_until_next_candle_close(tf: str, buffer_seconds: int = 3):
             wake_up_ist=ms_to_ist(target_ms),
             sleep_seconds=round(sleep_seconds, 2),
         )
+
         time.sleep(sleep_seconds)
+
 
 # ======================================================
 # SYMBOL LOADING
@@ -119,7 +129,9 @@ def normalize_symbols(symbols):
 
 
 def get_symbols_from_redis():
+
     raw = redis_client.get(REDIS_KEY)
+
     if not raw:
         return []
 
@@ -133,6 +145,7 @@ def get_symbols_from_redis():
 
 
 def get_symbols(symbols=None, btc_only=False):
+
     if symbols:
         return normalize_symbols(symbols)
 
@@ -147,23 +160,27 @@ def get_symbols(symbols=None, btc_only=False):
 # ======================================================
 
 def get_last_open_time_from_db(symbol: str, tf: str):
+
     Model = MODEL_MAP.get(tf)
+
     if not Model:
         return None
 
     session = SessionLocal()
+
     try:
         return (
             session.query(func.max(Model.open_time))
             .filter(Model.symbol == symbol)
             .scalar()
         )
+
     finally:
         session.close()
 
 
 # ======================================================
-# BINANCE FETCH (NO RETRY)
+# BINANCE FETCH
 # ======================================================
 
 def fetch_klines(symbol, tf, start_time, end_time):
@@ -176,7 +193,6 @@ def fetch_klines(symbol, tf, start_time, end_time):
         "limit": LIMIT,
     }
 
-    # 🔍 Log request parameters
     log(
         "[API REQUEST]",
         symbol=symbol,
@@ -189,8 +205,10 @@ def fetch_klines(symbol, tf, start_time, end_time):
     )
 
     try:
+
         resp = requests.get(URL, params=params, timeout=10)
         resp.raise_for_status()
+
         data = resp.json()
 
         if data:
@@ -205,8 +223,11 @@ def fetch_klines(symbol, tf, start_time, end_time):
         return data
 
     except Exception as e:
+
         log("[API ERROR]", symbol=symbol, error=str(e))
+
         return []
+
 
 # ======================================================
 # MAIN BACKFILL ENGINE
@@ -215,6 +236,7 @@ def fetch_klines(symbol, tf, start_time, end_time):
 def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
 
     tf_ms = get_tf_ms(tf)
+
     if not tf_ms:
         raise ValueError(f"Unsupported timeframe: {tf}")
 
@@ -229,6 +251,7 @@ def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
     start_ts = datetime_to_ms(start_date)
 
     symbols = get_symbols(symbols=symbols, btc_only=btc_only)
+
     if not symbols:
         log("[EXIT] No symbols found")
         return
@@ -242,10 +265,10 @@ def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
         last_ts = get_last_open_time_from_db(symbol, tf)
 
         if last_ts:
-            cursor = last_ts + tf_ms
+            cursor = align_timestamp(last_ts, tf_ms) + tf_ms
             log("[DB RESUME]", symbol=symbol, last=ms_to_ist(last_ts))
         else:
-            cursor = start_ts
+            cursor = align_timestamp(start_ts, tf_ms)
             log("[DB FRESH]", symbol=symbol, start=ms_to_ist(cursor))
 
         state[symbol] = {
@@ -259,6 +282,7 @@ def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
     while True:
 
         loop += 1
+
         if loop > MAX_GLOBAL_LOOPS:
             log("[GLOBAL SAFETY EXIT]")
             break
@@ -268,12 +292,14 @@ def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
         for symbol in symbols:
 
             info = state[symbol]
+
             if info["done"]:
                 continue
 
             active += 1
 
-            end_ts = datetime_to_ms(datetime.now(timezone.utc))
+            now_ms = datetime_to_ms(datetime.now(timezone.utc))
+            end_ts = align_timestamp(now_ms, tf_ms)
 
             if info["cursor"] > end_ts:
                 info["done"] = True
@@ -293,14 +319,15 @@ def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
                 continue
 
             payloads = build_payloads(symbol, tf, klines)
+
             insert_candles_batch(tf, payloads)
 
             info["fetched"] += len(klines)
 
             newest_open_time = klines[-1][0]
-            info["cursor"] = newest_open_time + tf_ms
 
-            # 🚨 Forward-only safety check
+            info["cursor"] = align_timestamp(newest_open_time, tf_ms) + tf_ms
+
             if info["cursor"] <= previous_cursor:
                 log("[SAFETY STOP - CURSOR STALLED]", symbol=symbol)
                 info["done"] = True
@@ -315,6 +342,7 @@ def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
             break
 
     log("======== FINAL SUMMARY ========")
+
     for sym, info in state.items():
         log("[SUMMARY]", symbol=sym, total_fetched=info["fetched"])
 
@@ -323,13 +351,36 @@ def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
 # ENTRY
 # ======================================================
 
+# ======================================================
+# ENTRY
+# ======================================================
+
 if __name__ == "__main__":
-    TF = "1h"
+
+    TFS = ["1d", "4h", "1h", "15m", "5m"]
+
+    first_run = True
+
     while True:
+
         try:
-            wait_until_next_candle_close(TF, buffer_seconds=1)
-            backfill_all_symbols(TF)
+
+            for TF in TFS:
+
+                # -----------------------------------------
+                # FIRST RUN → DO NOT WAIT
+                # -----------------------------------------
+                if not first_run:
+                    wait_until_next_candle_close(TF, buffer_seconds=1)
+
+                log("[BACKFILL RUN]", tf=TF, first_run=first_run)
+
+                backfill_all_symbols(TF)
+
+            first_run = False
 
         except Exception as e:
+
             log("[RUNTIME ERROR]", error=str(e))
+
             time.sleep(5)

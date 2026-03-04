@@ -8,9 +8,9 @@ HTF_LIST = ["15m", "1h", "4h", "1d"]
 
 
 def handle_new_1m(symbol: str, open_time: int):
-    for tf in HTF_LIST:
-        try_build_htf(symbol, tf, open_time)
-
+    # for tf in HTF_LIST:
+    #     try_build_htf(symbol, tf, open_time)
+    return 
 
 def try_build_htf(symbol: str, tf: str, last_1m_open: int):
     tf_ms = TF_TO_MS[tf]
