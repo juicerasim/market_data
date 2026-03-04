@@ -1,6 +1,7 @@
 import json
 import pandas as pd
 import numpy as np
+import os
 from sqlalchemy import select, distinct
 from datetime import datetime,  timedelta
 import time
@@ -17,7 +18,7 @@ class RADX1H:
         self.window = window
 
     # -------------------------------------------------------
-    # FETCH DATA
+    # FETCH DATA (UNCHANGED)
     # -------------------------------------------------------
     def fetch_data(self, symbols):
         db = SessionLocal()
@@ -44,16 +45,18 @@ class RADX1H:
         return df
 
     # -------------------------------------------------------
-    # CALCULATE INDICATORS
+    # CALCULATE INDICATORS (UPGRADED)
     # -------------------------------------------------------
     def calculate_indicators(self, df):
 
         # EMA
-        df["ema_21"] = df.groupby("symbol")["close_price"] \
-            .transform(lambda x: x.ewm(span=21).mean())
+        df["ema_21"] = df.groupby("symbol")["close_price"].transform(
+            lambda x: x.ewm(span=21).mean()
+        )
 
-        df["ema_slope"] = df.groupby("symbol")["ema_21"] \
-            .transform(lambda x: x.pct_change())
+        df["ema_slope"] = df.groupby("symbol")["ema_21"].transform(
+            lambda x: x.pct_change()
+        )
 
         df["above_ema"] = df["close_price"] > df["ema_21"]
         df["below_ema"] = df["close_price"] < df["ema_21"]
@@ -69,37 +72,45 @@ class RADX1H:
         rs = avg_gain / avg_loss
         df["rsi"] = 100 - (100 / (1 + rs))
 
-        # Range ratio
-        df["rolling_range"] = df.groupby("symbol")["close_price"] \
-            .transform(lambda x: x.rolling(20).max() - x.rolling(20).min())
+        # Range ratio (UNCHANGED)
+        df["rolling_range"] = df.groupby("symbol")["close_price"].transform(
+            lambda x: x.rolling(20).max() - x.rolling(20).min()
+        )
 
-        df["rolling_std"] = df.groupby("symbol")["close_price"] \
-            .transform(lambda x: x.rolling(20).std())
+        df["rolling_std"] = df.groupby("symbol")["close_price"].transform(
+            lambda x: x.rolling(20).std()
+        )
 
         df["range_ratio"] = df["rolling_std"] / df["rolling_range"]
 
-        # Structure (20 candle)
-        df["swing_high_20"] = df.groupby("symbol")["high_price"] \
-            .transform(lambda x: x.rolling(20).max())
+        # Structure
+        df["swing_high_20"] = df.groupby("symbol")["high_price"].transform(
+            lambda x: x.rolling(20).max()
+        )
 
-        df["swing_low_20"] = df.groupby("symbol")["low_price"] \
-            .transform(lambda x: x.rolling(20).min())
+        df["swing_low_20"] = df.groupby("symbol")["low_price"].transform(
+            lambda x: x.rolling(20).min()
+        )
 
         df["bos_down"] = df["close_price"] < df["swing_low_20"].shift(1)
         df["bos_up"] = df["close_price"] > df["swing_high_20"].shift(1)
 
-        df["bos_down_recent"] = df.groupby("symbol")["bos_down"] \
-            .transform(lambda x: x.rolling(3).max())
+        df["bos_down_recent"] = df.groupby("symbol")["bos_down"].transform(
+            lambda x: x.rolling(3).max()
+        )
 
-        df["bos_up_recent"] = df.groupby("symbol")["bos_up"] \
-            .transform(lambda x: x.rolling(3).max())
+        df["bos_up_recent"] = df.groupby("symbol")["bos_up"].transform(
+            lambda x: x.rolling(3).max()
+        )
 
         # Volume impulse
-        df["vol_avg_3"] = df.groupby("symbol")["base_volume"] \
-            .transform(lambda x: x.rolling(3).mean())
+        df["vol_avg_3"] = df.groupby("symbol")["base_volume"].transform(
+            lambda x: x.rolling(3).mean()
+        )
 
-        df["vol_avg_20"] = df.groupby("symbol")["base_volume"] \
-            .transform(lambda x: x.rolling(20).mean())
+        df["vol_avg_20"] = df.groupby("symbol")["base_volume"].transform(
+            lambda x: x.rolling(20).mean()
+        )
 
         df["vol_ratio"] = df["vol_avg_3"] / df["vol_avg_20"]
 
@@ -107,28 +118,83 @@ class RADX1H:
         df["red_candle"] = df["close_price"] < df["open_price"]
         df["green_candle"] = df["close_price"] > df["open_price"]
 
-        df["consecutive_red"] = df.groupby("symbol")["red_candle"] \
-            .transform(lambda x: x.rolling(5).sum())
+        df["consecutive_red"] = df.groupby("symbol")["red_candle"].transform(
+            lambda x: x.rolling(5).sum()
+        )
 
-        df["consecutive_green"] = df.groupby("symbol")["green_candle"] \
-            .transform(lambda x: x.rolling(5).sum())
+        df["consecutive_green"] = df.groupby("symbol")["green_candle"].transform(
+            lambda x: x.rolling(5).sum()
+        )
 
         # EMA distance
-        df["ema_distance"] = ((df["close_price"] - df["ema_21"]) / df["ema_21"]).abs()
+        df["ema_distance"] = (
+            (df["close_price"] - df["ema_21"]) / df["ema_21"]
+        ).abs()
 
-        # RSI divergence (simple 5-candle)
+        # RSI divergence (UNCHANGED)
         df["bullish_divergence"] = False
 
         for symbol in df["symbol"].unique():
             temp = df[df["symbol"] == symbol]
             if len(temp) >= 5:
                 if (
-                    temp["close_price"].iloc[-1] < temp["close_price"].iloc[-5] and
-                    temp["rsi"].iloc[-1] > temp["rsi"].iloc[-5]
+                    temp["close_price"].iloc[-1] < temp["close_price"].iloc[-5]
+                    and temp["rsi"].iloc[-1] > temp["rsi"].iloc[-5]
                 ):
                     df.loc[temp.index[-1], "bullish_divergence"] = True
 
-        # Funding extreme (if exists)
+        # -------------------------------
+        # NEW: ADX TREND STRENGTH
+        # -------------------------------
+        high = df["high_price"]
+        low = df["low_price"]
+        close = df["close_price"]
+
+        plus_dm = high.diff()
+        minus_dm = low.diff().abs()
+
+        plus_dm[plus_dm < 0] = 0
+        minus_dm[minus_dm < 0] = 0
+
+        tr1 = high - low
+        tr2 = (high - close.shift()).abs()
+        tr3 = (low - close.shift()).abs()
+
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        atr = tr.rolling(14).mean()
+
+        plus_di = 100 * (plus_dm.rolling(14).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(14).mean() / atr)
+
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+
+        df["adx"] = dx.rolling(14).mean()
+
+        # -------------------------------
+        # NEW: VOLATILITY EXPANSION
+        # -------------------------------
+        df["atr"] = atr
+
+        df["atr_expansion"] = df.groupby("symbol")["atr"].transform(
+            lambda x: x / x.rolling(20).mean()
+        )
+
+        # -------------------------------
+        # NEW: BEAR FLAG DETECTION
+        # -------------------------------
+        df["pullback_high_5"] = df.groupby("symbol")["high_price"].transform(
+            lambda x: x.rolling(5).max()
+        )
+
+        df["bear_flag"] = (
+            (df["below_ema"])
+            & (df["close_price"] < df["pullback_high_5"])
+            & (df["rsi"] > 35)
+            & (df["rsi"] < 55)
+        )
+
+        # Funding extreme (UNCHANGED)
         if "funding_rate" in df.columns:
             df["funding_extreme"] = df["funding_rate"].abs() > 0.01
         else:
@@ -137,11 +203,12 @@ class RADX1H:
         return df
 
     # -------------------------------------------------------
-    # ANALYSIS
+    # ANALYSIS (UPGRADED)
     # -------------------------------------------------------
     def analyze(self, df, symbols):
 
         results = []
+
         start_utc = pd.to_datetime(df["open_time"].min(), unit="ms", utc=True)
         end_utc = pd.to_datetime(df["open_time"].max(), unit="ms", utc=True)
 
@@ -149,11 +216,13 @@ class RADX1H:
         end_ist = end_utc.astimezone(IST)
 
         for symbol in symbols:
+
             row = df[df["symbol"] == symbol].iloc[-1]
+
             bias = 0
             signals = []
 
-            # Trend Structure
+            # Trend Structure (UNCHANGED)
             if row["ema_slope"] < -0.01:
                 bias -= 25
                 signals.append("EMA sloping down")
@@ -184,7 +253,7 @@ class RADX1H:
 
             bias = max(min(bias, 100), -100)
 
-            # Regime
+            # Regime (UNCHANGED)
             if bias <= -60:
                 regime = "Strong Bearish Trend"
                 guidance = "Prefer short continuation or pullback entries."
@@ -201,13 +270,19 @@ class RADX1H:
                 regime = "Neutral"
                 guidance = "No strong edge."
 
-            # Exhaustion
+            # Improved Exhaustion
             exhaustion_score = 0
-            if row["ema_distance"] > 0.05:
-                exhaustion_score += 30
-            if row["consecutive_red"] >= 4:
+
+            if row["ema_distance"] > 0.06:
                 exhaustion_score += 25
-            if row["vol_ratio"] > 2:
+
+            if row["rsi"] < 25:
+                exhaustion_score += 25
+
+            if row["consecutive_red"] >= 5:
+                exhaustion_score += 20
+
+            if row["atr_expansion"] > 1.6:
                 exhaustion_score += 20
 
             if exhaustion_score >= 60:
@@ -217,7 +292,7 @@ class RADX1H:
             else:
                 exhaustion = "Low Exhaustion Risk"
 
-            # Pullback Probability
+            # Pullback Probability (UNCHANGED)
             pullback_score = 0
             if bias <= -40:
                 if row["ema_distance"] > 0.05:
@@ -236,10 +311,12 @@ class RADX1H:
             else:
                 pullback_prob = "Low Pullback Probability"
 
-            # Reversal Probability
+            # Reversal Probability (UNCHANGED)
             reversal_score = 0
+
             if row["bullish_divergence"]:
                 reversal_score += 40
+
             if abs(row["ema_slope"]) < 0.005:
                 reversal_score += 20
 
@@ -248,6 +325,33 @@ class RADX1H:
             else:
                 reversal = "No Clear Reversal Signal"
 
+            # NEW: Continuation probability
+            continuation_score = 0
+
+            if row["adx"] > 30:
+                continuation_score += 25
+
+            if row["below_ema"]:
+                continuation_score += 20
+
+            if row["bos_down_recent"]:
+                continuation_score += 30
+
+            if row["bear_flag"]:
+                continuation_score += 25
+                signals.append("Bear flag pullback detected")
+
+            if row["atr_expansion"] > 1.3:
+                continuation_score += 20
+                signals.append("Volatility expansion detected")
+
+            if continuation_score >= 70:
+                continuation_signal = "High Probability Trend Continuation"
+            elif continuation_score >= 40:
+                continuation_signal = "Moderate Continuation Probability"
+            else:
+                continuation_signal = "Low Continuation Probability"
+
             results.append({
                 "symbol": symbol,
                 "regime": regime,
@@ -255,6 +359,7 @@ class RADX1H:
                 "exhaustion_risk": exhaustion,
                 "pullback_probability": pullback_prob,
                 "reversal_probability": reversal,
+                "continuation_probability": continuation_signal,
                 "funding_extreme": bool(row["funding_extreme"]),
                 "structure_signals": signals,
                 "decision_guidance": guidance
@@ -273,9 +378,6 @@ class RADX1H:
             },
             "results": results
         }
-
-import os
-from datetime import datetime
 
 def export_report_json(output: dict, folder: str = "reports"):
     """
@@ -345,41 +447,41 @@ def check_and_send_alert(output):
     send_telegram_message(final_message)
     print("Telegram alert sent.")
 
-# def wait_until_next_hour_close(buffer_minutes: int = 2):
-#     """
-#     Wait until next 1H candle close (IST aligned to :30)
-#     plus configurable buffer in minutes.
-#     """
-
-#     now = datetime.now(IST)
-
-#     # Determine next :30 boundary
-#     if now.minute < 30:
-#         base_close = now.replace(minute=30, second=0, microsecond=0)
-#     else:
-#         base_close = (
-#             now + timedelta(hours=1)
-#         ).replace(minute=30, second=0, microsecond=0)
-
-#     # Add buffer
-#     next_close = base_close + timedelta(minutes=buffer_minutes)
-
-#     wait_seconds = (next_close - now).total_seconds()
-
-#     print(
-#         f"Waiting {int(wait_seconds)} seconds "
-#         f"until execution at {next_close}"
-#     )
-
-#     time.sleep(max(wait_seconds, 0))
-def wait_until_next_hour_close():
+def wait_until_next_hour_close(buffer_minutes: int = 2):
     """
-    Testing mode:
-    Wait fixed 30 seconds between runs.
+    Wait until next 1H candle close (IST aligned to :30)
+    plus configurable buffer in minutes.
     """
+
     now = datetime.now(IST)
-    print(f"[{now.strftime('%H:%M:%S')}] Waiting 30 seconds for next test cycle...")
-    time.sleep(10)
+
+    # Determine next :30 boundary
+    if now.minute < 30:
+        base_close = now.replace(minute=30, second=0, microsecond=0)
+    else:
+        base_close = (
+            now + timedelta(hours=1)
+        ).replace(minute=30, second=0, microsecond=0)
+
+    # Add buffer
+    next_close = base_close + timedelta(minutes=buffer_minutes)
+
+    wait_seconds = (next_close - now).total_seconds()
+
+    print(
+        f"Waiting {int(wait_seconds)} seconds "
+        f"until execution at {next_close}"
+    )
+
+    time.sleep(max(wait_seconds, 0))
+# def wait_until_next_hour_close():
+#     """
+#     Testing mode:
+#     Wait fixed 30 seconds between runs.
+#     """
+#     now = datetime.now(IST)
+#     print(f"[{now.strftime('%H:%M:%S')}] Waiting 30 seconds for next test cycle...")
+#     time.sleep(10)
 # -------------------------------------------------------
 # RUN
 # -------------------------------------------------------
@@ -426,6 +528,28 @@ if __name__ == "__main__":
     # -----------------------------------
 
     engine = RADX1H(window=60)
+
+    # -------------------------------
+    # INITIAL RUN (Immediate)
+    # -------------------------------
+    print("Running initial scan using latest closed candle")
+
+    try:
+        df = engine.fetch_data(symbols)
+        df = engine.calculate_indicators(df)
+        output = engine.analyze(df, symbols)
+
+        print(json.dumps(output, indent=2))
+
+        export_report_json(output)
+        check_and_send_alert(output)
+
+    except Exception as e:
+        print("Error during initial scan:", e)
+
+    # -------------------------------
+    # PERIODIC RUN
+    # -------------------------------
     while True:
         print("====================")
 
