@@ -238,6 +238,20 @@ class OpenInterest5M(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+class OpenInterest15M(Base):
+    __tablename__ = "open_interest_15m"
+
+    symbol = Column(String(20), primary_key=True)
+    open_time = Column(BigInteger, primary_key=True)
+
+    open_interest = Column(Float, nullable=False)
+    oi_notional = Column(Float, nullable=False)
+    open_time_utc = Column(DateTime(timezone=True), nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+
 class FundingRate8H(Base):
     __tablename__ = "funding_rate_8h"
 

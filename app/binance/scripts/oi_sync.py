@@ -9,7 +9,7 @@ from app.redis_client import redis_client
 
 
 # =====================================================
-# LOGGING CONFIG
+# LOGGING
 # =====================================================
 
 logging.basicConfig(
@@ -29,6 +29,9 @@ REDIS_KEY = "liquid_coins"
 
 OI_URL = "https://fapi.binance.com/futures/data/openInterestHist"
 SERVER_TIME_URL = "https://fapi.binance.com/fapi/v1/time"
+
+TIMEFRAMES = ["5m", "15m", "1h"]
+BASE_TF = "5m"
 
 
 # =====================================================
@@ -58,39 +61,49 @@ def get_binance_server_time() -> int:
 def get_latest_closed_tf_ms(interval_ms: int) -> int:
     server_time = get_binance_server_time()
     closed = server_time - (server_time % interval_ms)
-    logger.info(f"Latest closed candle: {closed}")
     return closed
 
+
 # =====================================================
-# CANDLE CLOSE WAITER (FOR OI SYNC)
+# WAIT FOR NEXT CANDLE CLOSE
 # =====================================================
 
 def wait_until_next_candle_close(tf: str, buffer_seconds: int = 3):
-    """
-    Wait until next closed timeframe boundary + buffer.
-    Uses Binance server time to stay exchange-aligned.
-    """
 
     interval_ms = timeframe_to_ms(tf)
-
-    # Current Binance time
     server_time = get_binance_server_time()
 
-    # Next close boundary
     next_close = ((server_time // interval_ms) + 1) * interval_ms
-
-    # Add buffer
     target = next_close + (buffer_seconds * 1000)
 
     sleep_seconds = (target - server_time) / 1000
 
     if sleep_seconds > 0:
         wake_utc = datetime.fromtimestamp(target / 1000, tz=timezone.utc)
+
         logger.info(
-            f"Waiting for candle close | TF={tf} | "
-            f"Wake at {wake_utc} | Sleep {round(sleep_seconds,2)}s"
+            f"Waiting for {tf} close | wake at {wake_utc} | sleep {round(sleep_seconds,2)}s"
         )
+
         time.sleep(sleep_seconds)
+
+
+# =====================================================
+# DETECT CLOSED TIMEFRAMES
+# =====================================================
+
+def get_closed_timeframes(server_time_ms, timeframes):
+
+    closed = []
+
+    for tf in timeframes:
+
+        interval = timeframe_to_ms(tf)
+
+        if server_time_ms % interval < 5000:
+            closed.append(tf)
+
+    return closed
 
 
 # =====================================================
@@ -98,11 +111,14 @@ def wait_until_next_candle_close(tf: str, buffer_seconds: int = 3):
 # =====================================================
 
 def insert_oi_batch(table_name: str, rows: list):
+
     if not rows:
         return
 
     db = SessionLocal()
+
     try:
+
         q = text(f"""
             INSERT INTO {table_name}
             (symbol, open_time, open_time_utc,
@@ -118,17 +134,21 @@ def insert_oi_batch(table_name: str, rows: list):
 
         db.execute(q, rows)
         db.commit()
-        logger.info(f"{table_name} | Inserted/Updated {len(rows)} rows")
+
+        logger.info(f"{table_name} | upserted {len(rows)} rows")
 
     except Exception as e:
+
         logger.error(f"{table_name} | DB error: {e}")
         db.rollback()
+
     finally:
+
         db.close()
 
 
 # =====================================================
-# BINANCE FETCH
+# FETCH FROM BINANCE
 # =====================================================
 
 def fetch_oi(symbol: str, timeframe: str, start_time: int, end_time: int):
@@ -144,16 +164,19 @@ def fetch_oi(symbol: str, timeframe: str, start_time: int, end_time: int):
     resp = requests.get(OI_URL, params=params, timeout=10)
 
     if resp.status_code != 200:
-        logger.error(f"{symbol} | API {resp.status_code} | {resp.text}")
+
+        logger.error(f"{symbol} | API error {resp.status_code}")
         return []
 
     data = resp.json()
-    logger.info(f"{symbol} | API rows: {len(data)}")
+
+    logger.info(f"{symbol} | rows fetched {len(data)}")
+
     return data
 
 
 # =====================================================
-# MAIN FLEXIBLE FUNCTION
+# MAIN SYNC FUNCTION
 # =====================================================
 
 def sync_open_interest(
@@ -161,47 +184,30 @@ def sync_open_interest(
     coins: list[str] | None = None,
     backfill_days: int = 7
 ):
-    """
-    timeframe: '5m', '1h', etc.
-    coins: optional list like ['BTCUSDT', 'ETHUSDT']
-    backfill_days: number of days to backfill
-    """
 
     logger.info(f"Starting OI sync | TF={timeframe}")
 
     interval_ms = timeframe_to_ms(timeframe)
     max_window_ms = LIMIT * interval_ms
-    table_name = f"open_interest_{timeframe}"
 
-    # -------------------------------------------------
-    # Determine symbols
-    # -------------------------------------------------
+    table_name = f"open_interest_{timeframe}"
 
     if coins:
         symbols = coins
-        logger.info(f"Using passed coin list ({len(symbols)})")
     else:
         symbols = json.loads(redis_client.get(REDIS_KEY) or "[]")
-        logger.info(f"Using Redis symbols ({len(symbols)})")
 
     if not symbols:
-        logger.warning("No symbols found.")
+        logger.warning("No symbols found")
         return
-
-    # -------------------------------------------------
-    # Calculate time range
-    # -------------------------------------------------
 
     latest_closed = get_latest_closed_tf_ms(interval_ms)
 
     start_base = latest_closed - (
         backfill_days * 24 * 60 * 60 * 1000
     )
-    start_base -= (start_base % interval_ms)
 
-    # -------------------------------------------------
-    # Process each symbol
-    # -------------------------------------------------
+    start_base -= (start_base % interval_ms)
 
     for symbol in symbols:
 
@@ -209,15 +215,10 @@ def sync_open_interest(
 
         start_ts = start_base
         end_ts = latest_closed
-        total_inserted = 0
 
         while start_ts < end_ts:
 
             window_end = min(start_ts + max_window_ms, end_ts)
-
-            logger.info(
-                f"{symbol} | Window {start_ts} -> {window_end}"
-            )
 
             oi_data = fetch_oi(
                 symbol,
@@ -248,7 +249,6 @@ def sync_open_interest(
                 })
 
             insert_oi_batch(table_name, rows)
-            total_inserted += len(rows)
 
             last_ts = int(oi_data[-1]["timestamp"])
             last_ts -= (last_ts % interval_ms)
@@ -258,28 +258,44 @@ def sync_open_interest(
             if len(oi_data) < LIMIT:
                 break
 
-        logger.info(f"{symbol} | Total inserted: {total_inserted}")
-
-    logger.info("OI sync completed.")
-
 
 # =====================================================
-# OPTIONAL ENTRY POINT
+# ENTRY POINT
 # =====================================================
 
 if __name__ == "__main__":
 
-    TF = "1h"
+    first_run = True
 
     while True:
-        try:
-            wait_until_next_candle_close(TF, buffer_seconds=3)
 
-            sync_open_interest(
-                timeframe=TF,
-                backfill_days=7   # small window since it runs hourly
-            )
+        try:
+
+            if first_run:
+                logger.info("First run → immediate sync")
+
+                for tf in TIMEFRAMES:
+                    sync_open_interest(tf, backfill_days=7)
+
+                first_run = False
+
+            wait_until_next_candle_close(BASE_TF, buffer_seconds=3)
+
+            server_time = get_binance_server_time()
+
+            closed_tfs = get_closed_timeframes(server_time, TIMEFRAMES)
+
+            for tf in closed_tfs:
+
+                logger.info(f"{tf} candle closed → syncing")
+
+                sync_open_interest(
+                    timeframe=tf,
+                    backfill_days=1
+                )
 
         except Exception as e:
+
             logger.error(f"Runtime error: {e}")
+
             time.sleep(5)
