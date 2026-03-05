@@ -72,7 +72,7 @@ def get_tf_ms(tf):
         return int(TIMEFRAMES[tf]["tf_ms"])
 
     fallback = {
-        "1m": 60_000,
+        # "1m": 60_000,
         "5m": 300_000,
         "15m": 900_000,
         "1h": 3_600_000,
@@ -143,6 +143,29 @@ def get_symbols_from_redis():
 
     return normalize_symbols(data if isinstance(data, list) else [])
 
+def get_symbols_from_db():
+
+    session = SessionLocal()
+
+    try:
+
+        rows = session.execute("SELECT name FROM symbols").fetchall()
+
+        symbols = [r[0] for r in rows]
+
+        if symbols:
+            log("[SYMBOL SOURCE] DB", count=len(symbols))
+
+        return normalize_symbols(symbols)
+
+    except Exception as e:
+
+        log("[DB SYMBOL ERROR]", error=str(e))
+        return []
+
+    finally:
+        session.close()
+
 
 def get_symbols(symbols=None, btc_only=False):
 
@@ -151,6 +174,15 @@ def get_symbols(symbols=None, btc_only=False):
 
     if btc_only:
         return TEST_SYMBOLS
+
+    # 1️⃣ Try DB first
+    db_symbols = get_symbols_from_db()
+
+    if db_symbols:
+        return db_symbols
+
+    # 2️⃣ fallback to redis
+    log("[SYMBOL FALLBACK] Redis")
 
     return get_symbols_from_redis()
 
@@ -358,6 +390,7 @@ def backfill_all_symbols(tf, start_date=None, symbols=None, btc_only=TEST_MODE):
 if __name__ == "__main__":
 
     TFS = ["1d", "4h", "1h", "15m", "5m"]
+    # TFS = ["1d", "4h", "1h"]
 
     first_run = True
 
@@ -371,7 +404,7 @@ if __name__ == "__main__":
                 # FIRST RUN → DO NOT WAIT
                 # -----------------------------------------
                 if not first_run:
-                    wait_until_next_candle_close(TF, buffer_seconds=1)
+                    wait_until_next_candle_close(TF, buffer_seconds=4)
 
                 log("[BACKFILL RUN]", tf=TF, first_run=first_run)
 
