@@ -114,12 +114,16 @@ def main():
     wait_for_symbols()
 
     # 3️⃣ start candle collector
-    start_worker("app.binance.scripts.kline_history")
+    # start_worker("app.binance.scripts.kline_history")
 
     # 4️⃣ start open interest collector
     start_worker("app.binance.scripts.oi_sync")
 
+    # 5️⃣ start funding collector
     start_worker("app.binance.scripts.funding")
+
+    # 6️⃣ funding health checker
+    start_worker("app.binance.health.funding_health")
 
     logger.info("All workers started")
 
