@@ -111,8 +111,8 @@ def main():
 
     wait_for_symbols()
 
-    # start_worker("app.binance.scripts.kline_history")
-    # start_worker("app.binance.scripts.oi_sync")
+    start_worker("app.binance.scripts.kline_history")
+    start_worker("app.binance.scripts.oi_sync")
     start_worker("app.binance.scripts.funding")
     # start_worker("app.binance.health.funding_health")
 

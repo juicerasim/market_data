@@ -2,11 +2,14 @@ import requests
 import time
 import json
 import os
+import traceback
+import signal
 
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text, func
+from requests.adapters import HTTPAdapter
 
 from app.db import SessionLocal
 from app.config import TIMEFRAMES
@@ -30,20 +33,35 @@ TFS = ["5m", "15m", "1h", "4h", "1d"]
 
 IST = ZoneInfo("Asia/Kolkata")
 
+RUNNING = True
+START_TIME = time.time()
+
+# ==========================================================
+# HTTP SESSION (connection pooling)
+# ==========================================================
+
 session_http = requests.Session()
+
+adapter = HTTPAdapter(
+    pool_connections=50,
+    pool_maxsize=50
+)
+
+session_http.mount("https://", adapter)
+
+# ==========================================================
+# LOGGING SETUP
+# ==========================================================
 
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
 LOG_FILE = os.path.join(LOG_DIR, f"collector_{RUN_ID}.jsonl")
 
 log_fp = open(LOG_FILE, "a", buffering=1)
 
-
-# ==========================================================
-# LOGGER
-# ==========================================================
 
 def log(level, event, **data):
 
@@ -51,8 +69,12 @@ def log(level, event, **data):
         "ts": datetime.now(timezone.utc)
         .astimezone(IST)
         .strftime("%Y-%m-%d %H:%M:%S"),
+
         "level": level,
         "event": event,
+        "run_id": RUN_ID,
+        "pid": os.getpid(),
+        "uptime_sec": int(time.time() - START_TIME),
         **data
     }
 
@@ -61,6 +83,23 @@ def log(level, event, **data):
     print(line)
 
     log_fp.write(line + "\n")
+
+
+# ==========================================================
+# SIGNAL HANDLER (graceful shutdown)
+# ==========================================================
+
+def shutdown_handler(signum, frame):
+
+    global RUNNING
+
+    log("INFO", "SHUTDOWN_SIGNAL", signal=signum)
+
+    RUNNING = False
+
+
+signal.signal(signal.SIGINT, shutdown_handler)
+signal.signal(signal.SIGTERM, shutdown_handler)
 
 
 # ==========================================================
@@ -97,7 +136,7 @@ def align(ts, tf_ms):
 
 
 # ==========================================================
-# SYMBOL SOURCE
+# SYMBOL SOURCE (DB only)
 # ==========================================================
 
 def get_symbols():
@@ -119,7 +158,7 @@ def get_symbols():
 
 
 # ==========================================================
-# BULK LAST CANDLES (BOTTLENECK FIX)
+# BULK LAST CANDLES
 # ==========================================================
 
 def get_last_candles_bulk(tf):
@@ -158,26 +197,45 @@ def fetch_klines(symbol, tf, start_time):
         "limit": LIMIT
     }
 
-    for _ in range(MAX_RETRIES):
+    for retry in range(MAX_RETRIES):
 
         try:
 
-            r = session_http.get(URL, params=params, timeout=10)
+            r = session_http.get(
+                URL,
+                params=params,
+                timeout=(3, 10)
+            )
 
             if r.status_code == 429:
-                log("WARN", "RATE_LIMIT", symbol=symbol)
-                time.sleep(2)
+
+                sleep = 2 ** retry
+
+                log(
+                    "WARN",
+                    "RATE_LIMIT",
+                    symbol=symbol,
+                    sleep=sleep
+                )
+
+                time.sleep(sleep)
+
                 continue
 
             r.raise_for_status()
 
             return r.json()
 
-        except Exception as e:
+        except Exception:
 
-            log("ERROR", "API_ERROR", symbol=symbol, error=str(e))
+            log(
+                "ERROR",
+                "API_ERROR",
+                symbol=symbol,
+                trace=traceback.format_exc()
+            )
 
-            time.sleep(1)
+            time.sleep(2 ** retry)
 
     return []
 
@@ -219,15 +277,26 @@ def process_symbol(symbol, tf, safe_now, last_ts_map):
         ]
 
         if payloads:
-            insert_candles_batch(tf, payloads)
+
+            try:
+
+                insert_candles_batch(tf, payloads)
+
+            except Exception:
+
+                log(
+                    "ERROR",
+                    "DB_INSERT_FAILED",
+                    symbol=symbol,
+                    tf=tf,
+                    trace=traceback.format_exc()
+                )
 
         total += len(payloads)
 
         last_open_time = klines[-1][0]
 
-        next_cursor = last_open_time + tf_ms
-
-        if next_cursor <= cursor:
+        if last_open_time <= cursor:
 
             log(
                 "WARN",
@@ -239,7 +308,7 @@ def process_symbol(symbol, tf, safe_now, last_ts_map):
 
             break
 
-        cursor = next_cursor
+        cursor = last_open_time + tf_ms
 
         time.sleep(API_SLEEP)
 
@@ -258,7 +327,6 @@ def run_tf(tf, symbols):
 
     log("INFO", "TF_CHECK", tf=tf)
 
-    # BOTTLENECK FIX → single DB query
     last_ts_map = get_last_candles_bulk(tf)
 
     for symbol in symbols:
@@ -277,14 +345,14 @@ def run_tf(tf, symbols):
                     candles=count
                 )
 
-        except Exception as e:
+        except Exception:
 
             log(
                 "ERROR",
                 "SYMBOL_PROCESS_ERROR",
                 symbol=symbol,
                 tf=tf,
-                error=str(e)
+                trace=traceback.format_exc()
             )
 
 
@@ -302,29 +370,59 @@ def run_collector():
 
     now_ms = datetime_to_ms(datetime.now(timezone.utc))
 
-    # FIRST RUN → immediate
     for tf in TFS:
         next_run[tf] = now_ms
 
-    while True:
+    last_heartbeat = time.time()
 
-        now_ms = datetime_to_ms(datetime.now(timezone.utc))
+    while RUNNING:
 
-        symbols = get_symbols()
+        try:
 
-        for tf in TFS:
+            now_ms = datetime_to_ms(datetime.now(timezone.utc))
 
-            if now_ms >= next_run[tf]:
+            symbols = get_symbols()
 
-                run_tf(tf, symbols)
+            for tf in TFS:
 
-                tf_ms = tf_intervals[tf]
+                if now_ms >= next_run[tf]:
 
-                # align to NEXT candle close + buffer
-                next_close = ((now_ms // tf_ms) + 1) * tf_ms
-                next_run[tf] = next_close + CANDLE_BUFFER_MS
+                    try:
+
+                        run_tf(tf, symbols)
+
+                    except Exception:
+
+                        log(
+                            "ERROR",
+                            "TF_CRASH",
+                            tf=tf,
+                            trace=traceback.format_exc()
+                        )
+
+                    tf_ms = tf_intervals[tf]
+
+                    next_close = ((now_ms // tf_ms) + 1) * tf_ms
+
+                    next_run[tf] = next_close + CANDLE_BUFFER_MS
+
+            if time.time() - last_heartbeat > 60:
+
+                log("INFO", "COLLECTOR_HEARTBEAT")
+
+                last_heartbeat = time.time()
+
+        except Exception:
+
+            log(
+                "CRITICAL",
+                "COLLECTOR_LOOP_CRASH",
+                trace=traceback.format_exc()
+            )
 
         time.sleep(1)
+
+    log("INFO", "COLLECTOR_STOPPED")
 
 
 # ==========================================================
