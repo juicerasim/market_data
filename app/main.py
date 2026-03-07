@@ -2,40 +2,76 @@ import subprocess
 import sys
 import signal
 import time
-import threading
+from sqlalchemy import text
 
 from app.logging_config import setup_logging, get_logger, install_exception_hook
-# from app.binance.engine.startup_sync import run_startup_sync
-# from app.binance.engine.gap_watchdog import run_gap_watchdog
+from app.db import SessionLocal
 
-# ------------------------------------------------------
-# Workers to spawn as separate processes
-# ------------------------------------------------------
-WORKERS = [
-    "app.binance.coins_with_liquidity",
-    # "app.binance.ws.ws_engine",
-]
 
-processes = []
 RUNNING = True
+processes = []
 
 
 # ------------------------------------------------------
-# Start subprocess worker
+# Start worker
 # ------------------------------------------------------
-def start_worker(module: str):
+def start_worker(module):
+
     logger = get_logger("market_data.main")
-    logger.info("Starting worker %s", module)
-    return subprocess.Popen([sys.executable, "-m", module])
+
+    logger.info("Starting worker: %s", module)
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", module]
+    )
+
+    processes.append(proc)
+
+    return proc
 
 
 # ------------------------------------------------------
-# Graceful shutdown
+# Wait for symbols
+# ------------------------------------------------------
+def wait_for_symbols():
+
+    logger = get_logger("market_data.main")
+
+    logger.info("Waiting for symbols in DB...")
+
+    while True:
+
+        session = SessionLocal()
+
+        try:
+
+            count = session.execute(
+                text("SELECT count(*) FROM symbols")
+            ).scalar()
+
+            if count and count > 0:
+
+                logger.info("Symbols ready: %s", count)
+
+                return
+
+        finally:
+            session.close()
+
+        time.sleep(2)
+
+
+# ------------------------------------------------------
+# Shutdown handler
 # ------------------------------------------------------
 def shutdown_handler(sig, frame):
+
     global RUNNING
+
     logger = get_logger("market_data.main")
-    logger.info("Shutdown signal received: %s", sig)
+
+    logger.info("Shutdown signal received")
+
     RUNNING = False
 
     for p in processes:
@@ -51,6 +87,7 @@ def shutdown_handler(sig, frame):
             pass
 
     logger.info("All workers stopped")
+
     sys.exit(0)
 
 
@@ -59,52 +96,38 @@ signal.signal(signal.SIGTERM, shutdown_handler)
 
 
 # ------------------------------------------------------
-# MAIN BOOT FLOW
+# MAIN
 # ------------------------------------------------------
 def main():
-    global processes
 
     setup_logging()
     install_exception_hook()
-    # logger = get_logger("market_data.main")
 
-    # logger.info("Booting market-data pipeline")
+    logger = get_logger("market_data.main")
 
-    # # ---------------------------------------------
-    # # PHASE 1 — STARTUP SYNC
-    
-    # try:
-    #     logger.info("Running startup sync...")
-    #     run_startup_sync()
-    #     logger.info("Startup sync completed")
-    # except Exception:
-    #     logger.exception("Startup sync failed; continuing with live mode")
+    logger.info("Booting market-data pipeline")
 
-    # # ---------------------------------------------
-    # # PHASE 3 — GAP WATCHDOG (background thread)
-    # # ---------------------------------------------
-    # logger.info("Starting gap watchdog thread")
-    # watchdog_thread = threading.Thread(
-    #     target=run_gap_watchdog,
-    #     daemon=True,
-    # )
-    # watchdog_thread.start()
+    # 1️⃣ liquidity worker
+    start_worker("app.binance.coins_with_liquidity")
 
-    # # ---------------------------------------------
-    # # PHASE 2 — START WORKERS
-    # # ---------------------------------------------
-    # logger.info("Starting workers")
+    # 2️⃣ wait for symbols
+    wait_for_symbols()
 
-    processes = [start_worker(w) for w in WORKERS]
+    # 3️⃣ start candle collector
+    start_worker("app.binance.scripts.kline_history")
 
-    # logger.info("All workers started successfully")
+    # 4️⃣ start open interest collector
+    start_worker("app.binance.scripts.oi_sync")
 
-    # ---------------------------------------------
-    # Keep main process alive
-    # ---------------------------------------------
+    start_worker("app.binance.scripts.funding")
+
+    logger.info("All workers started")
+
     try:
+
         while RUNNING:
             time.sleep(1)
+
     except KeyboardInterrupt:
         shutdown_handler(None, None)
 

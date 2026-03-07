@@ -186,17 +186,22 @@ def sync_symbol_funding(symbol):
 
 if __name__ == "__main__":
 
-    print("Starting funding sync...\n")
+    while True:
 
-    redis_symbols = json.loads(redis_client.get(REDIS_KEY) or "[]")
-    db_symbols = get_symbols_from_db()
+        print("Starting funding sync...\n")
 
-    symbols = sorted(set(redis_symbols) | set(db_symbols))
+        redis_symbols = json.loads(redis_client.get(REDIS_KEY) or "[]")
+        db_symbols = get_symbols_from_db()
 
-    if not symbols:
-        print("No symbols found.")
-    else:
-        for symbol in symbols:
-            sync_symbol_funding(symbol)
+        symbols = sorted(set(redis_symbols) | set(db_symbols))
 
-    print("\nAll funding symbols processed.")
+        if not symbols:
+            print("No symbols found.")
+        else:
+            for symbol in symbols:
+                sync_symbol_funding(symbol)
+
+        print("\nFunding cycle finished. Sleeping 1 hour...\n")
+
+        import time
+        time.sleep(3600)
