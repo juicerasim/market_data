@@ -107,23 +107,14 @@ def main():
 
     logger.info("Booting market-data pipeline")
 
-    # 1️⃣ liquidity worker
     start_worker("app.binance.coins_with_liquidity")
 
-    # 2️⃣ wait for symbols
     wait_for_symbols()
 
-    # 3️⃣ start candle collector
     # start_worker("app.binance.scripts.kline_history")
-
-    # 4️⃣ start open interest collector
     start_worker("app.binance.scripts.oi_sync")
-
-    # 5️⃣ start funding collector
-    start_worker("app.binance.scripts.funding")
-
-    # 6️⃣ funding health checker
-    start_worker("app.binance.health.funding_health")
+    # start_worker("app.binance.scripts.funding")
+    # start_worker("app.binance.health.funding_health")
 
     logger.info("All workers started")
 
