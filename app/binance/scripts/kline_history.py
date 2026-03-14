@@ -53,7 +53,7 @@ session_http.mount("https://", adapter)
 # LOGGING SETUP
 # ==========================================================
 
-LOG_DIR = "logs"
+LOG_DIR = os.path.join("logs", "collector")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
