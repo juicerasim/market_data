@@ -26,7 +26,7 @@ class Settings:
 settings = Settings()
 
 TIMEFRAMES = {
-    # "1m":  {"tf_ms": 60_000,        "table": "candles_1m",  "api": True},
+    "1m":  {"tf_ms": 60_000,        "table": "candles_1m",  "api": True},
     # "2m":  {"tf_ms": 120_000,       "table": "candles_2m",  "api": False},
     "5m":  {"tf_ms": 300_000,       "table": "candles_5m",  "api": True},  # derived
     "15m": {"tf_ms": 900_000,       "table": "candles_15m", "api": True},

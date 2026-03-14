@@ -5,7 +5,7 @@ import os
 import traceback
 import signal
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text, func
@@ -31,13 +31,21 @@ CANDLE_BUFFER_MS = 3000
 
 TFS = ["5m", "15m", "1h", "4h", "1d"]
 
+DEFAULT_HISTORY_DAYS = 90
+
+# Optional overrides for backfill
+BACKFILL_TFS = None
+BACKFILL_SYMBOLS = None
+BACKFILL_START = None
+BACKFILL_END = None
+
 IST = ZoneInfo("Asia/Kolkata")
 
 RUNNING = True
 START_TIME = time.time()
 
 # ==========================================================
-# HTTP SESSION (connection pooling)
+# HTTP SESSION
 # ==========================================================
 
 session_http = requests.Session()
@@ -50,7 +58,7 @@ adapter = HTTPAdapter(
 session_http.mount("https://", adapter)
 
 # ==========================================================
-# LOGGING SETUP
+# LOGGING
 # ==========================================================
 
 LOG_DIR = os.path.join("logs", "collector")
@@ -69,7 +77,6 @@ def log(level, event, **data):
         "ts": datetime.now(timezone.utc)
         .astimezone(IST)
         .strftime("%Y-%m-%d %H:%M:%S"),
-
         "level": level,
         "event": event,
         "run_id": RUN_ID,
@@ -86,7 +93,7 @@ def log(level, event, **data):
 
 
 # ==========================================================
-# SIGNAL HANDLER (graceful shutdown)
+# SIGNAL HANDLER
 # ==========================================================
 
 def shutdown_handler(signum, frame):
@@ -120,6 +127,7 @@ def get_tf_ms(tf):
         return int(TIMEFRAMES[tf]["tf_ms"])
 
     fallback = {
+        "1m": 60000,
         "5m": 300000,
         "15m": 900000,
         "1h": 3600000,
@@ -135,11 +143,31 @@ def align(ts, tf_ms):
     return ts - (ts % tf_ms)
 
 
+def get_backfill_range():
+
+    now = datetime.now(timezone.utc)
+
+    if BACKFILL_END:
+        end_dt = datetime.fromisoformat(BACKFILL_END).replace(tzinfo=timezone.utc)
+    else:
+        end_dt = now
+
+    if BACKFILL_START:
+        start_dt = datetime.fromisoformat(BACKFILL_START).replace(tzinfo=timezone.utc)
+    else:
+        start_dt = end_dt - timedelta(days=DEFAULT_HISTORY_DAYS)
+
+    return datetime_to_ms(start_dt), datetime_to_ms(end_dt)
+
+
 # ==========================================================
-# SYMBOL SOURCE (DB only)
+# SYMBOL SOURCE
 # ==========================================================
 
 def get_symbols():
+
+    if BACKFILL_SYMBOLS:
+        return BACKFILL_SYMBOLS
 
     session = SessionLocal()
 
@@ -248,14 +276,16 @@ def process_symbol(symbol, tf, safe_now, last_ts_map):
 
     tf_ms = get_tf_ms(tf)
 
+    start_ts, range_end = get_backfill_range()
+
     last_ts = last_ts_map.get(symbol)
 
     if last_ts:
         cursor = align(last_ts, tf_ms) + tf_ms
     else:
-        return 0
+        cursor = align(start_ts, tf_ms)
 
-    end_ts = align(safe_now, tf_ms)
+    end_ts = align(min(safe_now, range_end), tf_ms)
 
     if cursor > end_ts:
         return 0
@@ -270,16 +300,16 @@ def process_symbol(symbol, tf, safe_now, last_ts_map):
             break
 
         payloads = build_payloads(symbol, tf, klines)
+        # print(json.dumps(klines, indent=2))
 
         payloads = [
             p for p in payloads
-            if p["open_time"] >= cursor
+            if cursor <= p["open_time"] <= end_ts
         ]
 
         if payloads:
 
             try:
-
                 insert_candles_batch(tf, payloads)
 
             except Exception:
@@ -308,7 +338,7 @@ def process_symbol(symbol, tf, safe_now, last_ts_map):
 
             break
 
-        cursor = last_open_time + tf_ms
+        cursor = last_open_time + 1
 
         time.sleep(API_SLEEP)
 
@@ -364,13 +394,15 @@ def run_collector():
 
     log("INFO", "COLLECTOR_STARTED")
 
-    tf_intervals = {tf: get_tf_ms(tf) for tf in TFS}
+    tfs = BACKFILL_TFS if BACKFILL_TFS else TFS
+
+    tf_intervals = {tf: get_tf_ms(tf) for tf in tfs}
 
     next_run = {}
 
     now_ms = datetime_to_ms(datetime.now(timezone.utc))
 
-    for tf in TFS:
+    for tf in tfs:
         next_run[tf] = now_ms
 
     last_heartbeat = time.time()
@@ -383,12 +415,11 @@ def run_collector():
 
             symbols = get_symbols()
 
-            for tf in TFS:
+            for tf in tfs:
 
                 if now_ms >= next_run[tf]:
 
                     try:
-
                         run_tf(tf, symbols)
 
                     except Exception:
